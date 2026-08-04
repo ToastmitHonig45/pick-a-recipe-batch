@@ -8,6 +8,7 @@ import os
 import sys
 import base64
 import secrets
+import tempfile
 import threading
 import json
 from datetime import datetime, timedelta
@@ -747,6 +748,40 @@ def delete_job_api(job_id):
     return jsonify({'error': 'Job not found'}), 404
 
 
+def _resolve_history_image(item):
+    """
+    Resolve a usable image file for a history entry.
+
+    Prefers the original file on disk, but falls back to the base64 thumbnail
+    stored in the database (the on-disk copy under /tmp does not survive a
+    container restart).
+
+    Returns:
+        (path, is_temp) where is_temp means the caller must delete the file.
+    """
+    image_path = item.get('thumbnail_path')
+    if image_path and os.path.exists(image_path):
+        return image_path, False
+
+    thumbnail_data = item.get('thumbnail_data')
+    if not thumbnail_data:
+        return None, False
+
+    try:
+        raw = base64.b64decode(thumbnail_data)
+    except (ValueError, TypeError):
+        return None, False
+
+    # Keep the .jpg suffix: both exporters derive the content type from it,
+    # and thumbnails are stored as JPEG.
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+            tmp.write(raw)
+            return tmp.name, True
+    except OSError:
+        return None, False
+
+
 @app.route('/api/history/<int:history_id>/reupload', methods=['POST'])
 @api_login_required
 def reupload_recipe(history_id):
@@ -761,38 +796,56 @@ def reupload_recipe(history_id):
         return jsonify({'error': 'No recipe data available for this entry'}), 400
     
     recipe_data = item['recipe_data']
-    image_path = item.get('thumbnail_path')
-    
+
     # Get target from request or use default
     data = request.get_json() or {}
     target = data.get('target', config.OUTPUT_TARGET)
-    
+
+    # The original image lives under /tmp, which is not persisted across
+    # container restarts. Fall back to the base64 copy kept in history so the
+    # image still gets pushed. Returns (path, cleanup_flag).
+    image_path, image_is_temp = _resolve_history_image(item)
+
     try:
         config.reload()
-        
+        image_uploaded = False
+
         if target == 'tandoor':
             from tandoor import Tandoor
             tandoor = Tandoor()
             result = tandoor.create_recipe(recipe_data)
-            if image_path and os.path.exists(image_path) and result.get("id"):
-                tandoor.upload_image(result["id"], image_path)
+            if image_path and result.get("id"):
+                image_uploaded = bool(tandoor.upload_image(result["id"], image_path))
         elif target == 'mealie':
             from mealie import Mealie
             mealie = Mealie()
             result = mealie.create_recipe(recipe_data)
             recipe_slug = result.get("slug") or result.get("id")
-            if image_path and os.path.exists(image_path) and recipe_slug:
-                mealie.upload_image(recipe_slug, image_path)
+            if image_path and recipe_slug:
+                image_uploaded = bool(mealie.upload_image(recipe_slug, image_path))
         else:
             return jsonify({'error': f'Unknown target: {target}'}), 400
-        
+
+        message = f'Recipe re-uploaded to {target}'
+        if image_path and not image_uploaded:
+            message += ' (image upload failed)'
+        elif not image_path:
+            message += ' (no image available)'
+
         return jsonify({
             'status': 'success',
-            'message': f'Recipe re-uploaded to {target}',
-            'target': target
+            'message': message,
+            'target': target,
+            'image_uploaded': image_uploaded,
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    finally:
+        if image_is_temp and image_path:
+            try:
+                os.remove(image_path)
+            except OSError:
+                pass
 
 
 # ===== Settings Export/Import API Endpoints =====
