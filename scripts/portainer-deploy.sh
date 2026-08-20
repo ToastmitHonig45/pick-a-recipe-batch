@@ -11,8 +11,10 @@
 #   PORTAINER_USER=admin \
 #   PORTAINER_PASSWORD=secret \
 #   ./scripts/portainer-deploy.sh --pull
+#   ./scripts/portainer-deploy.sh --dev --force-recreate   # bind-mount source + hot reload
 #
 # Options:
+#   --dev             Use portainer/stack.dev.yml (source bind-mount + FLASK_DEBUG)
 #   --pull            Pull latest image when updating
 #   --force-recreate  Delete existing stack (incl. external) and recreate via Portainer
 #   --dry-run         Print config and exit
@@ -58,6 +60,7 @@ COMPOSE_FILE="${COMPOSE_FILE:-portainer/stack.yml}"
 PULL_IMAGE=false
 FORCE_RECREATE=false
 DRY_RUN=false
+DEV_MODE=false
 
 if [[ -f "portainer/stack.env.local" ]]; then
   ENV_FILE="portainer/stack.env.local"
@@ -79,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --env-file)     ENV_FILE="$2"; shift 2 ;;
     --compose)      COMPOSE_FILE="$2"; shift 2 ;;
     --pull)         PULL_IMAGE=true; shift ;;
+    --dev)          DEV_MODE=true; COMPOSE_FILE="portainer/stack.dev.yml"; shift ;;
     --force-recreate) FORCE_RECREATE=true; shift ;;
     --dry-run)      DRY_RUN=true; shift ;;
     --help|-h)
@@ -124,30 +128,41 @@ PORTAINER_AUTH_MODE="jwt"
 COMPOSE_CONTENT="$(cat "${COMPOSE_FILE}")"
 
 build_env_json() {
-  local env_file="$1"
-  local json="["
-  local first=true
-  while IFS= read -r line || [[ -n "${line}" ]]; do
-    [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
-    [[ "${line}" != *"="* ]] && continue
-    local key="${line%%=*}"
-    local value="${line#*=}"
-    value="${value%%#*}"
-    value="${value%"${value##*[![:space:]]}"}"
-    [[ "${key}" == PORTAINER_* ]] && continue
-    [[ "${first}" == "false" ]] && json+=","
-    json+=$(printf '{"name":%s,"value":%s}' \
-      "$(echo -n "${key}" | jq -Rs .)" \
-      "$(echo -n "${value}" | jq -Rs .)")
-    first=false
-  done < "${env_file}"
-  json+="]"
-  echo "${json}"
+  # Merge portainer/stack.env (defaults) + stack.env.local (overrides).
+  # Portainer only receives vars listed here — compose ${VAR} refs need matching stack env entries.
+  local base_file="${REPO_ROOT}/portainer/stack.env"
+  local override_file="${ENV_FILE:-}"
+  python3 - "${base_file}" "${override_file}" <<'PY'
+import json, sys
+
+def load_env(path: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path:
+        return out
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if key.startswith("PORTAINER_"):
+                    continue
+                out[key] = value.strip()
+    except FileNotFoundError:
+        pass
+    return out
+
+merged = load_env(sys.argv[1])
+merged.update(load_env(sys.argv[2]))
+print(json.dumps([{"name": k, "value": v} for k, v in merged.items()]))
+PY
 }
 
 ENV_JSON="[]"
-if [[ -n "${ENV_FILE}" && -f "${ENV_FILE}" ]]; then
-  ENV_JSON="$(build_env_json "${ENV_FILE}")"
+if [[ -f "${REPO_ROOT}/portainer/stack.env" || ( -n "${ENV_FILE}" && -f "${ENV_FILE}" ) ]]; then
+  ENV_JSON="$(build_env_json)"
 fi
 
 stop_external_containers() {
@@ -189,6 +204,7 @@ portainer_api() {
 info "Portainer URL : ${PORTAINER_URL}"
 info "Stack name    : ${STACK_NAME}"
 info "Compose file  : ${COMPOSE_FILE}"
+info "Dev mode      : ${DEV_MODE}"
 info "Pull image    : ${PULL_IMAGE}"
 info "Force recreate: ${FORCE_RECREATE}"
 [[ "${DRY_RUN}" == "true" ]] && { success "Dry run — exiting."; exit 0; }
@@ -263,4 +279,7 @@ if [[ -z "${stack_id}" ]]; then
 fi
 
 success "Stack '${STACK_NAME}' deployed under Portainer control (ID: ${stack_id})"
+if [[ "${DEV_MODE}" == "true" ]]; then
+  info "Dev mode: /opt/pick-a-recipe is bind-mounted — edit files locally, refresh browser (Python auto-reloads)"
+fi
 info "App URL: http://192.168.127.252:5006"

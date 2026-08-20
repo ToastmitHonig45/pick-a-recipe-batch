@@ -22,7 +22,7 @@
     <!-- PWA Manifest -->
     <link rel="manifest" href="/manifest.json">
     
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v={{ static_version }}">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     {% block extra_head %}{% endblock %}
 </head>
@@ -91,7 +91,8 @@
             deferredPrompt = null;
         });
         
-        // Register service worker
+        // Register service worker (disabled in dev — avoids stale cached CSS/JS)
+        {% if not flask_debug %}
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', async () => {
                 try {
@@ -134,6 +135,14 @@
         } else {
             console.warn('[SW] Service workers not supported');
         }
+        {% else %}
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then((registrations) => {
+                registrations.forEach((registration) => registration.unregister());
+            });
+            console.log('[SW] Dev mode — service worker disabled');
+        }
+        {% endif %}
         
         // Function to trigger install prompt (can be called from UI button)
         window.installPWA = async () => {

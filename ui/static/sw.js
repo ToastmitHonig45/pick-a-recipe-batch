@@ -1,6 +1,6 @@
-const CACHE_NAME = 'pick-a-recipe-v6';
-const STATIC_CACHE_NAME = 'pick-a-recipe-static-v6';
-const CDN_CACHE_NAME = 'pick-a-recipe-cdn-v6';
+const CACHE_NAME = 'pick-a-recipe-v7';
+const STATIC_CACHE_NAME = 'pick-a-recipe-static-v7';
+const CDN_CACHE_NAME = 'pick-a-recipe-cdn-v7';
 
 // Static assets to cache on install
 const STATIC_ASSETS = [
@@ -124,14 +124,11 @@ self.addEventListener('fetch', (event) => {
     return;
   }
   
-  // Handle static assets - cache-first
+  // Handle static assets - network-first so UI/CSS updates are picked up quickly
   if (url.pathname.startsWith('/static/')) {
     event.respondWith(
-      caches.match(event.request).then((cachedResponse) => {
-        if (cachedResponse) {
-          return cachedResponse;
-        }
-        return fetch(event.request).then((response) => {
+      fetch(event.request)
+        .then((response) => {
           if (response.ok) {
             const responseClone = response.clone();
             caches.open(STATIC_CACHE_NAME).then((cache) => {
@@ -139,8 +136,8 @@ self.addEventListener('fetch', (event) => {
             });
           }
           return response;
-        });
-      })
+        })
+        .catch(() => caches.match(event.request))
     );
     return;
   }

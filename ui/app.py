@@ -38,6 +38,11 @@ from job_manager import init_job_manager, get_job_manager, resolve_max_concurren
 
 app = Flask(__name__)
 
+# Behind reverse proxy (Cloudflare / NPM): trust X-Forwarded-* so _external URLs use HTTPS.
+if os.environ.get('TRUST_PROXY', 'true').lower() in ('true', '1', 'yes'):
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
 # Serve manifest.json with correct MIME type and headers for PWA
 @app.route('/manifest.json')
 def serve_manifest():
@@ -107,6 +112,18 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 if os.environ.get('SESSION_COOKIE_SECURE', '').lower() in ('true', '1', 'yes'):
     app.config['SESSION_COOKIE_SECURE'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
+
+FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'false').lower() in ('true', '1', 'yes')
+
+
+@app.context_processor
+def inject_template_globals():
+    """Expose debug flag and static cache-bust version to templates."""
+    import time
+    return {
+        'flask_debug': FLASK_DEBUG,
+        'static_version': str(int(time.time())) if FLASK_DEBUG else '7',
+    }
 
 # Use threading mode instead of eventlet to avoid monkey-patching issues with SSL/requests
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
@@ -407,13 +424,23 @@ def setup_password():
     return render_template('setup_password.html', user=user)
 
 
+def _google_redirect_uri() -> str:
+    """OAuth callback URL — must match Google Cloud Console authorized redirect URIs."""
+    explicit = os.environ.get('GOOGLE_OAUTH_REDIRECT_URI', '').strip()
+    if explicit:
+        return explicit
+    public = os.environ.get('PUBLIC_URL', '').strip().rstrip('/')
+    if public:
+        return f'{public}/auth/google/callback'
+    return url_for('auth_google_callback', _external=True)
+
+
 @app.route('/auth/google')
 def auth_google():
     if oauth is None:
         flash('Google sign-in is not configured', 'error')
         return redirect(url_for('login'))
-    redirect_uri = url_for('auth_google_callback', _external=True)
-    return oauth.google.authorize_redirect(redirect_uri)
+    return oauth.google.authorize_redirect(_google_redirect_uri())
 
 
 @app.route('/auth/google/callback')
@@ -1325,4 +1352,4 @@ if __name__ == '__main__':
     host = os.getenv('HOST', '0.0.0.0')
     port = int(os.getenv('PORT', '5006'))
     debug = os.getenv('FLASK_DEBUG', 'false').lower() in ('true', '1', 'yes')
-    socketio.run(app, debug=debug, host=host, port=port, allow_unsafe_werkzeug=True)
+    socketio.run(app, debug=debug, host=host, port=port, allow_unsafe_werkzeug=True, use_reloader=debug)

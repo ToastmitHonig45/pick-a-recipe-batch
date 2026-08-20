@@ -1,4 +1,5 @@
 import os
+import time
 import yt_dlp
 from yt_dlp.utils import DownloadError
 from helpers import setup_logger
@@ -6,6 +7,15 @@ from helpers import setup_logger
 logger = setup_logger(__name__)
 
 INSTAGRAM_HOSTS = ("instagram.com", "www.instagram.com")
+
+# Errors that are worth retrying (TikTok bot-detection flakes)
+_RETRYABLE_FRAGMENTS = (
+    "universal data for rehydration",
+    "unexpected response from webpage",
+    "unable to extract challenge data",
+)
+
+_TIKTOK_HOSTS = ("tiktok.com", "www.tiktok.com")
 
 
 def _is_instagram_url(url: str) -> bool:
@@ -16,6 +26,22 @@ def _is_instagram_url(url: str) -> bool:
         return host in INSTAGRAM_HOSTS or host.endswith(".instagram.com")
     except Exception:
         return "instagram.com" in (url or "").lower()
+
+
+def _is_tiktok_url(url: str) -> bool:
+    """Return True if the URL points to TikTok."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc.lower()
+        return host in _TIKTOK_HOSTS or host.endswith(".tiktok.com")
+    except Exception:
+        return "tiktok.com" in (url or "").lower()
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Return True if a DownloadError is a transient TikTok bot-detection failure."""
+    msg = str(exc).lower()
+    return any(fragment in msg for fragment in _RETRYABLE_FRAGMENTS)
 
 
 def format_download_error(exc: Exception, url: str) -> str:
@@ -58,7 +84,11 @@ class VideoDownloader:
     Supports multiple video sources including TikTok, YouTube, Instagram, and others
     supported by yt-dlp.
     """
-    
+
+    # Max attempts for transient TikTok bot-detection failures.
+    _TIKTOK_MAX_RETRIES = 3
+    _TIKTOK_RETRY_DELAY = 2  # seconds between attempts
+
     def __init__(self, url):
         self.url = url
         self.video_id = None
@@ -100,22 +130,42 @@ class VideoDownloader:
         }
 
     def _get_info(self):
-        """Fetch metadata (description, title, etc.) without downloading the video."""
+        """Fetch metadata (description, title, etc.) without downloading the video.
+
+        TikTok occasionally returns a page without the rehydration payload even
+        after a successful JS-challenge solve (intermittent bot-detection flake).
+        We retry up to _TIKTOK_MAX_RETRIES times for those transient errors.
+        """
         logger.debug(f"Fetching video info for: {self.url}")
         ydl_opts = {
             **self._base_ydl_opts(),
             "skip_download": True,
         }
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(self.url, download=False)
-        except DownloadError as exc:
-            raise DownloadError(format_download_error(exc, self.url)) from exc
+        is_tiktok = _is_tiktok_url(self.url)
+        max_attempts = self._TIKTOK_MAX_RETRIES if is_tiktok else 1
+        last_exc = None
 
-        self.video_id = info.get("id")
-        logger.debug(f"Video ID extracted: {self.video_id}")
-        return info
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(self.url, download=False)
+                self.video_id = info.get("id")
+                logger.debug(f"Video ID extracted: {self.video_id}")
+                return info
+            except DownloadError as exc:
+                last_exc = exc
+                if is_tiktok and _is_retryable(exc) and attempt < max_attempts:
+                    logger.warning(
+                        f"TikTok bot-detection flake on attempt {attempt}/{max_attempts}, "
+                        f"retrying in {self._TIKTOK_RETRY_DELAY}s…"
+                    )
+                    time.sleep(self._TIKTOK_RETRY_DELAY)
+                    continue
+                raise DownloadError(format_download_error(exc, self.url)) from exc
+
+        # Should not be reached, but satisfy type checker
+        raise DownloadError(format_download_error(last_exc, self.url)) from last_exc
 
     def _download_video(self):
         """Download the video to /tmp/<video_id>/ folder."""
@@ -135,11 +185,25 @@ class VideoDownloader:
                 "merge_output_format": "mp4",
             }
 
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([self.url])
-            except DownloadError as exc:
-                raise DownloadError(format_download_error(exc, self.url)) from exc
+            is_tiktok = _is_tiktok_url(self.url)
+            max_attempts = self._TIKTOK_MAX_RETRIES if is_tiktok else 1
+            last_exc = None
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([self.url])
+                    break
+                except DownloadError as exc:
+                    last_exc = exc
+                    if is_tiktok and _is_retryable(exc) and attempt < max_attempts:
+                        logger.warning(
+                            f"TikTok bot-detection flake on download attempt {attempt}/{max_attempts}, "
+                            f"retrying in {self._TIKTOK_RETRY_DELAY}s…"
+                        )
+                        time.sleep(self._TIKTOK_RETRY_DELAY)
+                        continue
+                    raise DownloadError(format_download_error(exc, self.url)) from exc
 
             logger.debug(f"Download completed: {video_path}")
         return self.video_id, video_path

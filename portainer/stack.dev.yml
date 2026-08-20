@@ -1,10 +1,10 @@
 # =============================================================================
-# Pick-a-Recipe — Portainer Stack (srv2 production)
+# Pick-a-Recipe — Dev stack (source bind-mount + hot reload)
 # =============================================================================
-# Deploy via: scripts/portainer-deploy.sh
+# Deploy via: ./scripts/portainer-deploy.sh --dev --force-recreate
 #
-# Uses pickeld/pick-a-recipe:latest from Docker Hub.
-# Data volume `social_recipe_social-recipes` is the legacy name kept for srv2 upgrades.
+# Mounts /opt/pick-a-recipe into /app so Python/template/CSS changes apply
+# without rebuilding the image. FLASK_DEBUG enables Werkzeug auto-reloader.
 # =============================================================================
 
 services:
@@ -17,6 +17,7 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 5006
+      FLASK_DEBUG: "true"
       FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
       MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-3}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
@@ -25,6 +26,7 @@ services:
       PUBLIC_URL: ${PUBLIC_URL:-}
       TRUST_PROXY: ${TRUST_PROXY:-true}
     volumes:
+      - /opt/pick-a-recipe:/app
       - pick-a-recipe-data:/app/data
       - pick-a-recipe-data:/tmp
 

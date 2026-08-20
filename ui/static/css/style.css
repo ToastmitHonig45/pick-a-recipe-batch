@@ -282,7 +282,7 @@ main.with-sidebar {
     font-size: 0.95rem;
 }
 
-.form-group input,
+.form-group input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
 .form-group select,
 .form-select {
     width: 100%;
@@ -299,7 +299,7 @@ main.with-sidebar {
     appearance: none;
 }
 
-.form-group input:focus,
+.form-group input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):focus,
 .form-group select:focus {
     outline: none;
     border-color: var(--primary-color);
@@ -766,23 +766,48 @@ main.with-sidebar {
 }
 
 /* ===== Checkbox Styles ===== */
+.checkbox-group {
+    margin-bottom: 1.25rem;
+}
+
 .checkbox-label {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 0.75rem;
     cursor: pointer;
     padding: 0.5rem 0;
+    user-select: none;
+    -webkit-user-select: none;
+    position: relative;
+    z-index: 1;
 }
 
 .checkbox-label input[type="checkbox"] {
-    width: 20px;
-    height: 20px;
+    width: 1.25rem;
+    height: 1.25rem;
+    min-width: 1.25rem;
+    min-height: 1.25rem;
+    padding: 0;
+    margin: 0;
+    flex-shrink: 0;
     accent-color: var(--primary-color);
     cursor: pointer;
+    appearance: auto;
+    -webkit-appearance: checkbox;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+    pointer-events: auto;
+    touch-action: manipulation;
 }
 
 .checkbox-text {
     font-weight: 500;
+    color: var(--text-primary);
+}
+
+.checkbox-group > .checkbox-label {
+    margin-bottom: 0;
     color: var(--text-primary);
 }
 
@@ -1270,7 +1295,7 @@ main.with-sidebar {
         margin-bottom: 0.4rem;
     }
     
-    .form-group input,
+    .form-group input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
     .form-group select {
         padding: 0.75rem;
         font-size: 1rem;
@@ -1460,7 +1485,7 @@ main.with-sidebar {
         font-size: 0.9rem;
     }
     
-    .form-group input {
+    .form-group input:not([type="checkbox"]):not([type="radio"]):not([type="file"]) {
         padding: 1rem;
         font-size: 1rem;
     }
