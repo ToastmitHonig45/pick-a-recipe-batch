@@ -57,7 +57,7 @@ fi
 
 if [[ "${DEPLOY_MODE}" == "api" ]]; then
   echo "[migrate] Deploying via Portainer API (removes external/orphan stack first)..."
-  exec "${REPO_ROOT}/scripts/portainer-deploy.sh" --pull --force-recreate
+  exec "${REPO_ROOT}/scripts/portainer-deploy.sh" --pull --force-recreate --stop-external
 fi
 
 STACK_ID="${PORTAINER_STACK_ID:-521}"

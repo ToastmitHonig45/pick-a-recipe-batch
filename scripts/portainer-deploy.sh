@@ -17,6 +17,9 @@
 #   --dev             Use portainer/stack.dev.yml (source bind-mount + FLASK_DEBUG)
 #   --pull            Pull latest image when updating
 #   --force-recreate  Delete existing stack (incl. external) and recreate via Portainer
+#   --stop-external   Stop containers deployed outside Portainer before deploying
+#                     (migration cleanup; off by default so routine updates never
+#                     kill the live container outside Portainer's control)
 #   --dry-run         Print config and exit
 #   --help            Show help
 
@@ -59,6 +62,7 @@ STACK_NAME="${STACK_NAME:-pick-a-recipe}"
 COMPOSE_FILE="${COMPOSE_FILE:-portainer/stack.yml}"
 PULL_IMAGE=false
 FORCE_RECREATE=false
+STOP_EXTERNAL=false
 DRY_RUN=false
 DEV_MODE=false
 
@@ -84,6 +88,7 @@ while [[ $# -gt 0 ]]; do
     --pull)         PULL_IMAGE=true; shift ;;
     --dev)          DEV_MODE=true; COMPOSE_FILE="portainer/stack.dev.yml"; shift ;;
     --force-recreate) FORCE_RECREATE=true; shift ;;
+    --stop-external)  STOP_EXTERNAL=true; shift ;;
     --dry-run)      DRY_RUN=true; shift ;;
     --help|-h)
       sed -n '2,22p' "$0" | sed 's/^# \?//'
@@ -207,9 +212,12 @@ info "Compose file  : ${COMPOSE_FILE}"
 info "Dev mode      : ${DEV_MODE}"
 info "Pull image    : ${PULL_IMAGE}"
 info "Force recreate: ${FORCE_RECREATE}"
+info "Stop external : ${STOP_EXTERNAL}"
 [[ "${DRY_RUN}" == "true" ]] && { success "Dry run — exiting."; exit 0; }
 
-stop_external_containers
+if [[ "${STOP_EXTERNAL}" == "true" ]]; then
+  stop_external_containers
+fi
 
 if [[ "${PORTAINER_AUTH_MODE}" == "apikey" ]]; then
   info "Authenticating with Portainer API key..."

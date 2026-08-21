@@ -1,0 +1,92 @@
+# Build & Deploy — pick-a-recipe
+#
+# On every push to main:
+#   1. Build the Docker image (linux/amd64) and push it to Docker Hub
+#      as pickeld/pick-a-recipe:latest (+ :sha-<commit> for rollback).
+#   2. Call Portainer on srv2 via scripts/portainer-deploy.sh --pull,
+#      which updates the "pick-a-recipe" stack (compose file + env)
+#      and pulls the freshly pushed image.
+#
+# Runs on a SELF-HOSTED runner inside the LAN (Portainer at
+# https://192.168.127.251:7441 is not reachable from GitHub-hosted runners).
+# Register a runner on srv2 or any LAN machine with docker + git installed:
+#   repo → Settings → Actions → Runners → New self-hosted runner
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   DOCKERHUB_USERNAME  Docker Hub username ("pickeld")
+#   DOCKERHUB_TOKEN     Docker Hub access token (hub.docker.com → Account Settings → Security)
+#   PORTAINER_URL       e.g. https://192.168.127.251:7441
+#   PORTAINER_API_KEY   Portainer access token (Portainer → My account → Access tokens)
+#   STACK_ENV_LOCAL     Contents of portainer/stack.env.local (FLASK_SECRET_KEY,
+#                       Google SSO keys, ...). Written to portainer/stack.env.local
+#                       before deploying so the real app secrets reach the stack —
+#                       without it the deploy would overwrite them with placeholders.
+
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-push:
+    name: Build & push image
+    runs-on: [self-hosted]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # amd64 only: srv2 is amd64 and QEMU-emulated arm64 builds of this image
+      # take ~15-30 min. Use ./build-and-push.sh for manual multi-arch pushes.
+      # No explicit cache config: the docker-container builder's cache volume
+      # persists on the self-hosted host between runs.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            pickeld/pick-a-recipe:latest
+            pickeld/pick-a-recipe:${{ github.sha }}
+
+  deploy:
+    name: Deploy to srv2 via Portainer
+    runs-on: [self-hosted]
+    needs: build-push
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write stack env from secret
+        env:
+          STACK_ENV_LOCAL: ${{ secrets.STACK_ENV_LOCAL }}
+        run: |
+          if [[ -z "$STACK_ENV_LOCAL" ]]; then
+            echo "::error::STACK_ENV_LOCAL secret is not set — see header of .github/workflows/deploy.yml"
+            exit 1
+          fi
+          printf '%s\n' "$STACK_ENV_LOCAL" > portainer/stack.env.local
+
+      - name: Update srv2 stack (pull new image)
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+        run: ./scripts/portainer-deploy.sh --pull
