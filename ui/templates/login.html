@@ -10,49 +10,19 @@
             <h1>Pick-a-Recipe</h1>
             <p>Extract recipes from social media videos</p>
         </div>
-        
-        <form method="POST" action="{{ url_for('login') }}" class="login-form">
-            <div class="form-group">
-                <label for="username">
-                    <i class="fas fa-user"></i>
-                    Username
-                </label>
-                <input type="text" id="username" name="username" required autofocus 
-                       placeholder="Enter your username"
-                       autocomplete="username" autocapitalize="none" spellcheck="false">
-            </div>
-            
-            <div class="form-group">
-                <label for="password">
-                    <i class="fas fa-lock"></i>
-                    Password
-                </label>
-                <input type="password" id="password" name="password" required
-                       placeholder="Enter your password"
-                       autocomplete="current-password">
-            </div>
-            
-            <div class="form-group remember-me">
-                <label class="checkbox-label">
-                    <input type="checkbox" id="remember_me" name="remember_me">
-                    <span class="checkmark"></span>
-                    Remember me for 30 days
-                </label>
-            </div>
-            
-            <button type="submit" class="btn btn-primary btn-block">
-                <i class="fas fa-sign-in-alt"></i>
-                Login
-            </button>
-        </form>
 
-        {% if google_enabled %}
-        <div class="login-divider" style="text-align:center; margin: 1rem 0; color: #888;">or</div>
-        <a href="{{ url_for('auth_google') }}" class="btn btn-secondary btn-block" style="display:flex; align-items:center; justify-content:center; gap:0.5rem;">
-            <i class="fab fa-google"></i> Sign in with Google
+        {% if sso_enabled %}
+        <a href="{{ url_for('auth_login') }}" class="btn btn-primary btn-block" style="display:flex; align-items:center; justify-content:center; gap:0.5rem;">
+            <i class="fas fa-fingerprint"></i> Sign in with Authentik
         </a>
+        {% else %}
+        <p class="form-hint" style="text-align:center;">
+            <i class="fas fa-triangle-exclamation"></i>
+            Single sign-on is not configured on this server. Set
+            <code>AUTHENTIK_CLIENT_ID</code> and <code>AUTHENTIK_CLIENT_SECRET</code>.
+        </p>
         {% endif %}
-        
+
         <div class="login-footer">
             <button id="install-btn" class="btn btn-secondary btn-block" style="display: none; margin-top: 1rem;">
                 <i class="fas fa-download"></i>
@@ -80,7 +50,7 @@
             });
         }
     });
-    
+
     // Hide button if already installed
     window.addEventListener('appinstalled', () => {
         const installBtn = document.getElementById('install-btn');

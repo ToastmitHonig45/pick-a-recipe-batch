@@ -104,7 +104,7 @@ The UI uses Socket.IO for real-time progress updates. The stages are:
 
 ## Security Notes
 
-- Passwords are hashed using SHA-256
+- Authentication is delegated to Authentik single sign-on (OIDC) — no local passwords
+- Access requires membership in the configured Authentik user group; admin features require the admin group
 - Session management uses Flask's secure sessions
 - API keys are stored in the local configuration file
-- For production use, consider using a proper database and stronger hashing (bcrypt)

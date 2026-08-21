@@ -6,9 +6,7 @@ Uses SQLite to store configuration, user data, jobs, and recipe history.
 import os
 import json
 import sqlite3
-import hashlib
 import uuid
-import bcrypt
 from datetime import datetime
 from contextlib import contextmanager
 from typing import Optional, List, Dict, Any
@@ -43,7 +41,11 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
+                oidc_sub TEXT UNIQUE,
+                email TEXT,
+                name TEXT,
+                avatar_url TEXT,
+                is_admin INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -114,11 +116,6 @@ def init_db():
 
         _migrate_schema(conn)
 
-        # Create default admin user if no users exist
-        cursor.execute('SELECT COUNT(*) FROM users')
-        if cursor.fetchone()[0] == 0:
-            create_user('admin', 'admin123', must_change_password=True, is_admin=True)
-        
         # Initialize default config values if not exist
         cursor.execute('SELECT COUNT(*) FROM config')
         if cursor.fetchone()[0] == 0:
@@ -140,19 +137,15 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     """Apply incremental schema migrations for existing databases."""
     cursor = conn.cursor()
 
-    user_columns = {
-        'email': 'TEXT',
-        'google_id': 'TEXT',
-        'auth_provider': "TEXT DEFAULT 'local'",
-        'must_change_password': 'INTEGER DEFAULT 0',
-        'is_admin': 'INTEGER DEFAULT 0',
-        'avatar_url': 'TEXT',
-    }
-    for col, typedef in user_columns.items():
-        try:
-            cursor.execute(f'ALTER TABLE users ADD COLUMN {col} {typedef}')
-        except sqlite3.OperationalError:
-            pass
+    # Legacy local-auth schema detected: rebuild the users table for OIDC-only
+    # auth. Previously created local/Google accounts are discarded (fresh
+    # start); job history and configuration are preserved.
+    cursor.execute('PRAGMA table_info(users)')
+    columns = {row[1] for row in cursor.fetchall()}
+    if columns and 'password_hash' in columns:
+        print('[DB] Rebuilding users table for OIDC-only auth (legacy local accounts removed)')
+        cursor.execute('DROP TABLE users')
+        conn.commit()
 
     job_columns = {
         'retry_from_history_id': 'INTEGER',
@@ -178,63 +171,55 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
     conn.commit()
 
-    cursor.execute("UPDATE users SET is_admin = 1 WHERE username = 'admin' AND is_admin = 0")
-    conn.commit()
-
-
-def hash_password(password: str) -> str:
-    """Hash a password using bcrypt."""
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-
-def _verify_password_hash(stored_hash: str, password: str) -> bool:
-    """Verify password against bcrypt or legacy SHA-256 hash."""
-    if stored_hash.startswith('$2'):
-        return bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
-    return stored_hash == hashlib.sha256(password.encode()).hexdigest()
-
-
-def _upgrade_password_hash(username: str, password: str) -> None:
-    """Upgrade legacy SHA-256 hash to bcrypt on successful login."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            'UPDATE users SET password_hash = ? WHERE username = ?',
-            (hash_password(password), username),
-        )
-        conn.commit()
-
 
 # ===== User Functions =====
 
-def create_user(
+def upsert_oidc_user(
+    sub: str,
     username: str,
-    password: str | None = None,
     *,
-    email: str | None = None,
-    google_id: str | None = None,
-    auth_provider: str = 'local',
-    must_change_password: bool = False,
+    email: Optional[str] = None,
+    name: Optional[str] = None,
+    avatar_url: Optional[str] = None,
     is_admin: bool = False,
-    avatar_url: str | None = None,
-) -> bool:
-    """Create a new user."""
-    pw_hash = hash_password(password) if password else ''
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
+) -> Dict[str, Any]:
+    """Create or refresh the local cache record for an OIDC (Authentik) user.
+
+    Users are identified by their stable OIDC subject (`sub`). On first login a
+    unique username is derived from preferred_username/email; if taken by a
+    different subject, a numeric suffix is appended. Admin flag mirrors group
+    membership at login time.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE oidc_sub = ?', (sub,))
+        row = cursor.fetchone()
+        if row:
             cursor.execute(
-                '''INSERT INTO users
-                   (username, password_hash, email, google_id, auth_provider,
-                    must_change_password, is_admin, avatar_url)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                (username, pw_hash, email, google_id, auth_provider,
-                 int(must_change_password), int(is_admin), avatar_url),
+                '''UPDATE users
+                   SET email = ?, name = ?, avatar_url = ?, is_admin = ?
+                   WHERE id = ?''',
+                (email, name, avatar_url, int(is_admin), row['id']),
             )
             conn.commit()
-            return True
-    except sqlite3.IntegrityError:
-        return False
+            return get_user(row['username'])
+
+        base = (username or sub)[:64]
+        final_username = base
+        n = 1
+        while cursor.execute(
+            'SELECT 1 FROM users WHERE username = ?', (final_username,)
+        ).fetchone():
+            final_username = f'{base}-{n}'
+            n += 1
+
+        cursor.execute(
+            '''INSERT INTO users (username, oidc_sub, email, name, avatar_url, is_admin)
+               VALUES (?, ?, ?, ?, ?, ?)''',
+            (final_username, sub, email, name, avatar_url, int(is_admin)),
+        )
+        conn.commit()
+        return get_user(final_username)
 
 
 def get_user(username: str) -> Optional[Dict[str, Any]]:
@@ -246,92 +231,13 @@ def get_user(username: str) -> Optional[Dict[str, Any]]:
         return dict(row) if row else None
 
 
-def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
+def get_user_by_sub(sub: str) -> Optional[Dict[str, Any]]:
+    """Get user record by OIDC subject claim."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE email = ?', (email,))
+        cursor.execute('SELECT * FROM users WHERE oidc_sub = ?', (sub,))
         row = cursor.fetchone()
         return dict(row) if row else None
-
-
-def get_user_by_google_id(google_id: str) -> Optional[Dict[str, Any]]:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE google_id = ?', (google_id,))
-        row = cursor.fetchone()
-        return dict(row) if row else None
-
-
-def list_users() -> List[Dict[str, Any]]:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            'SELECT id, username, email, auth_provider, is_admin, created_at FROM users ORDER BY username'
-        )
-        return [dict(row) for row in cursor.fetchall()]
-
-
-def delete_user(username: str) -> bool:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM users WHERE username = ?', (username,))
-        conn.commit()
-        return cursor.rowcount > 0
-
-
-def user_must_change_password(username: str) -> bool:
-    user = get_user(username)
-    return bool(user and user.get('must_change_password'))
-
-
-def clear_must_change_password(username: str) -> None:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            'UPDATE users SET must_change_password = 0 WHERE username = ?',
-            (username,),
-        )
-        conn.commit()
-
-
-def link_google_account(username: str, google_id: str, email: str, avatar_url: str | None = None) -> bool:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            '''UPDATE users SET google_id = ?, email = ?, auth_provider = 'google',
-               avatar_url = COALESCE(?, avatar_url) WHERE username = ?''',
-            (google_id, email, avatar_url, username),
-        )
-        conn.commit()
-        return cursor.rowcount > 0
-
-
-def verify_user(username: str, password: str) -> bool:
-    """Verify user credentials."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            'SELECT password_hash FROM users WHERE username = ?',
-            (username,)
-        )
-        row = cursor.fetchone()
-        if row and row['password_hash'] and _verify_password_hash(row['password_hash'], password):
-            if not row['password_hash'].startswith('$2'):
-                _upgrade_password_hash(username, password)
-            return True
-        return False
-
-
-def update_password(username: str, new_password: str) -> bool:
-    """Update user password."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            'UPDATE users SET password_hash = ? WHERE username = ?',
-            (hash_password(new_password), username)
-        )
-        conn.commit()
-        return cursor.rowcount > 0
 
 
 # ===== Config Functions =====

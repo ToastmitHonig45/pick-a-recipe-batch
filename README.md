@@ -249,8 +249,11 @@ docker pull pickeld/pick-a-recipe:v1.0.0
 | `FLASK_SECRET_KEY` | Secret key for session cookies | Auto-generated |
 | `FLASK_DEBUG` | Enable debug mode | `false` |
 | `MAX_CONCURRENT_JOBS` | Parallel extraction workers (1–16) | `3` (or Settings value) |
-| `GOOGLE_CLIENT_ID` | Google OAuth client ID (enables SSO) | — |
-| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret | — |
+| `AUTHENTIK_ISSUER_URL` | Authentik OIDC issuer URL | `https://auth.pickel.me/application/o/pick-a-recipe` |
+| `AUTHENTIK_CLIENT_ID` | Authentik OAuth2 client ID (required for sign-in) | — |
+| `AUTHENTIK_CLIENT_SECRET` | Authentik OAuth2 client secret | — |
+| `AUTHENTIK_USER_GROUP` | Authentik group required for access | `pick-a-recipe-users` |
+| `AUTHENTIK_ADMIN_GROUP` | Authentik group granting admin rights | `admins` |
 | `SESSION_COOKIE_SECURE` | Set secure cookie flag (use with HTTPS) | `false` |
 
 ### Docker Compose (Using Docker Hub)

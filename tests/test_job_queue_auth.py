@@ -1,4 +1,4 @@
-"""Tests for job queue and auth utilities."""
+"""Tests for job queue utilities."""
 
 import os
 import sys
@@ -11,21 +11,6 @@ sys.path.insert(0, os.path.join(ROOT, 'ui'))
 
 _test_dir = tempfile.mkdtemp()
 os.environ['DATA_DIR'] = _test_dir
-
-
-class TestPasswordHashing(unittest.TestCase):
-    def test_bcrypt_roundtrip(self):
-        from database import hash_password, _verify_password_hash
-        hashed = hash_password('securepass123')
-        self.assertTrue(hashed.startswith('$2'))
-        self.assertTrue(_verify_password_hash(hashed, 'securepass123'))
-        self.assertFalse(_verify_password_hash(hashed, 'wrong'))
-
-    def test_legacy_sha256_upgrade(self):
-        import hashlib
-        from database import _verify_password_hash
-        legacy = hashlib.sha256(b'admin123').hexdigest()
-        self.assertTrue(_verify_password_hash(legacy, 'admin123'))
 
 
 class TestQueuePosition(unittest.TestCase):

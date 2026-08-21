@@ -227,9 +227,9 @@
             </div>
         </div>
 
-        <!-- Queue & Auth Settings -->
+        <!-- Queue Settings -->
         <div class="settings-section">
-            <h2><i class="fas fa-stream"></i> Queue & Access</h2>
+            <h2><i class="fas fa-stream"></i> Queue</h2>
 
             <div class="form-row">
                 <div class="form-group">
@@ -240,19 +240,7 @@
                 </div>
             </div>
 
-            <div class="form-group checkbox-group">
-                <label class="checkbox-label" for="allow_registration">
-                    <input type="checkbox" id="allow_registration" name="allow_registration"
-                           {% if config.allow_registration != 'false' %}checked{% endif %}>
-                    <span class="checkbox-text">Allow new user registrations (Google SSO)</span>
-                </label>
-            </div>
-
-            {% if google_oauth_configured %}
-            <p class="form-hint"><i class="fab fa-google"></i> Google SSO is configured via GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.</p>
-            {% else %}
-            <p class="form-hint">Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET env vars to enable Google sign-in.</p>
-            {% endif %}
+            <p class="form-hint"><i class="fas fa-key"></i> Sign-in and user access are managed via Authentik single sign-on.</p>
         </div>
         
         <div class="form-actions">
@@ -285,50 +273,6 @@
                 <small class="form-hint">Upload a previously exported settings file.</small>
             </div>
         </div>
-    </div>
-
-    {% if users %}
-    <div class="settings-section">
-        <h2><i class="fas fa-users"></i> Users</h2>
-        <ul class="users-list">
-            {% for u in users %}
-            <li>{{ u.username }} ({{ u.auth_provider }}){% if u.is_admin %} — admin{% endif %}
-                {% if u.username != session.user %}
-                <button type="button" class="btn btn-icon delete-user-btn" data-username="{{ u.username }}" title="Delete user">
-                    <i class="fas fa-trash"></i>
-                </button>
-                {% endif %}
-            </li>
-            {% endfor %}
-        </ul>
-    </div>
-    {% endif %}
-    
-    <!-- Change Password Section -->
-    <div class="settings-section password-section">
-        <h2><i class="fas fa-key"></i> Change Password</h2>
-        
-        <form method="POST" action="{{ url_for('change_password') }}" class="password-form">
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="current_password">Current Password</label>
-                    <input type="password" id="current_password" name="current_password" required>
-                </div>
-                <div class="form-group">
-                    <label for="new_password">New Password</label>
-                    <input type="password" id="new_password" name="new_password" required minlength="6">
-                </div>
-                <div class="form-group">
-                    <label for="confirm_password">Confirm New Password</label>
-                    <input type="password" id="confirm_password" name="confirm_password" required minlength="6">
-                </div>
-            </div>
-            
-            <button type="submit" class="btn btn-secondary">
-                <i class="fas fa-key"></i>
-                Change Password
-            </button>
-        </form>
     </div>
 </div>
 
@@ -426,16 +370,6 @@ document.getElementById('cookies-file-upload').addEventListener('change', async 
     
     // Reset the file input
     e.target.value = '';
-});
-
-document.querySelectorAll('.delete-user-btn').forEach(btn => {
-    btn.addEventListener('click', async function() {
-        const username = this.dataset.username;
-        if (!confirm('Delete user ' + username + '?')) return;
-        const resp = await fetch('/api/users/' + encodeURIComponent(username), { method: 'DELETE' });
-        if (resp.ok) location.reload();
-        else alert('Failed to delete user');
-    });
 });
 </script>
 {% endblock %}

@@ -93,7 +93,6 @@ DEFAULT_CONFIG = {
     "yt_dlp_cookies_file": "",
     "yt_dlp_cookies_browser": "",
     "max_concurrent_jobs": "3",
-    "allow_registration": "true",
 }
 
 
@@ -252,11 +251,6 @@ class Config:
             return max(1, min(16, int(raw)))
         except (TypeError, ValueError):
             return 3
-
-    @property
-    def ALLOW_REGISTRATION(self) -> bool:
-        value = self._get('allow_registration', DEFAULT_CONFIG['allow_registration'])
-        return value.lower() in ('true', '1', 'yes', 'on')
 
     def reload(self):
         """Reload configuration from database."""
