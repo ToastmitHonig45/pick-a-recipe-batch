@@ -1124,7 +1124,7 @@ def process_video_job(job_id, jm):
     from pipeline import (
         PipelineStats,
         PreviewWaiter,
-        run_extraction_pipeline,
+        run_url_pipeline,
     )
     from config import config as app_config
 
@@ -1177,7 +1177,7 @@ def process_video_job(job_id, jm):
             socketio_emit_cancelled=emit_cancelled,
         )
 
-    result = run_extraction_pipeline(job['url'], reporter, stats=stats, preview=preview)
+    result = run_url_pipeline(job['url'], reporter, stats=stats, preview=preview)
 
     if result.error == 'cancelled':
         return

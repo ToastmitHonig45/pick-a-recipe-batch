@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 
 from config import config
-from helpers import get_recipe_system_prompt, get_yield_nutrition_prompt, setup_logger
+from helpers import get_recipe_system_prompt, get_web_recipe_system_prompt, get_yield_nutrition_prompt, setup_logger
 from llm_resilience import call_with_model_fallback
 
 logger = setup_logger(__name__)
@@ -206,6 +206,68 @@ class Chef:
                 if attempt < max_retries - 1:
                     continue
         
+        raise RuntimeError(
+            f"Failed to parse LLM response as JSON after {max_retries} attempts. "
+            f"Last error: {last_error}"
+        )
+
+    def create_recipe_from_web_content(
+        self,
+        *,
+        page_text: str,
+        structured_data: dict | None = None,
+        source_url: str | None = None,
+        max_retries: int = 3,
+    ) -> dict:
+        """Create a normalised recipe from a scraped web page.
+
+        If ``structured_data`` is a Schema.org Recipe dict we include it
+        verbatim so the LLM can use accurate quantities/steps instead of
+        guessing from raw text.  The raw ``page_text`` is always appended as a
+        fallback context.
+        """
+        logger.info("[AI Recipe] Starting recipe creation from web content...")
+
+        payload: dict = {"source_url": source_url or self.source_url}
+
+        if structured_data:
+            payload["structured_recipe"] = structured_data
+            logger.info("[AI Recipe] Structured Schema.org Recipe included in payload")
+
+        if page_text:
+            payload["page_text"] = page_text
+
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                logger.info(
+                    f"[AI Recipe] Calling LLM to normalise web recipe "
+                    f"(attempt {attempt + 1}/{max_retries})..."
+                )
+                response_text = self._call_llm(
+                    get_web_recipe_system_prompt(),
+                    json.dumps(payload, ensure_ascii=False),
+                )
+                logger.info(f"[AI Recipe] LLM response received ({len(response_text)} chars)")
+                data = json.loads(response_text)
+                logger.info(f"[AI Recipe] Recipe parsed. Name: {data.get('name', 'Unknown')}")
+                recipe = self._postprocess_recipe(data, source_url)
+                logger.info(
+                    f"[AI Recipe] Recipe postprocessed. "
+                    f"Ingredients: {len(recipe.get('recipeIngredient', []))}, "
+                    f"Steps: {len(recipe.get('recipeInstructions', []))}"
+                )
+                recipe = self._enrich_yield_and_nutrition(recipe)
+                logger.info("[AI Recipe] Web recipe creation complete.")
+                return recipe
+            except json.JSONDecodeError as e:
+                last_error = e
+                logger.warning(
+                    f"[AI Recipe] JSON parsing failed (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                if attempt < max_retries - 1:
+                    continue
+
         raise RuntimeError(
             f"Failed to parse LLM response as JSON after {max_retries} attempts. "
             f"Last error: {last_error}"

@@ -1,5 +1,9 @@
 """
-Shared video-to-recipe extraction pipeline used by the web UI and CLI.
+Shared extraction pipeline used by the web UI and CLI.
+
+Supports two source types:
+  - video  : download via yt-dlp → Whisper transcription → Chef
+  - webpage: HTTP fetch → Schema.org / HTML extraction → Chef
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from config import config
 from image_extractor import extract_dish_image_candidates
 from transcriber import Transcriber
 from video_downloader import VideoDownloader
+from web_recipe_fetcher import is_video_url, fetch_web_recipe, download_image
 
 
 class ProgressReporter(Protocol):
@@ -265,6 +270,206 @@ def run_extraction_pipeline(
 
     except Exception as exc:
         return PipelineResult(error=f"Error: {exc}", llm_tokens_estimate=stats.llm_tokens_estimate)
+
+
+def run_web_recipe_pipeline(
+    url: str,
+    reporter: ProgressReporter,
+    *,
+    work_dir: str = "/tmp",
+    stats: PipelineStats | None = None,
+    preview: PreviewWaiter | None = None,
+    skip_upload: bool = False,
+) -> PipelineResult:
+    """Run the fetch → parse → normalise → upload pipeline for a recipe web page."""
+    stats = stats or PipelineStats()
+
+    try:
+        config.reload()
+
+        if reporter.is_cancelled():
+            return PipelineResult(error="cancelled")
+
+        reporter.update("info", "Fetching recipe page...", 10)
+        web_data = fetch_web_recipe(url)
+        title = web_data["title"]
+        reporter.update("info", f"Page: {title}", 20, video_title=title)
+
+        if reporter.is_cancelled():
+            return PipelineResult(error="cancelled")
+
+        reporter.update("visual", "Extracting recipe content...", 35)
+        page_text = web_data.get("page_text", "")
+        structured = web_data.get("structured")
+        stats.add_text(page_text)
+        reporter.update("visual", "Recipe content extracted", 50)
+
+        if reporter.is_cancelled():
+            return PipelineResult(error="cancelled")
+
+        reporter.update("image", "Downloading recipe image...", 60)
+        image_path: str | None = None
+        image_url = web_data.get("image_url")
+        if image_url:
+            import hashlib
+            url_hash = hashlib.md5(url.encode()).hexdigest()[:16]
+            img_dir = os.path.join(work_dir, f"web_{url_hash}")
+            image_path = download_image(image_url, img_dir)
+        reporter.update("image", "Image ready" if image_path else "No image found", 65)
+
+        if reporter.is_cancelled():
+            return PipelineResult(error="cancelled")
+
+        reporter.update("evaluate", "Normalising recipe with AI...", 70)
+        from chef import Chef
+
+        chef = Chef(
+            source_url=url,
+            description=web_data.get("description", ""),
+            transcription="",
+        )
+        recipe_data = chef.create_recipe_from_web_content(
+            page_text=page_text,
+            structured_data=structured,
+            source_url=url,
+        )
+        if not recipe_data:
+            return PipelineResult(
+                error="Failed to normalise recipe",
+                llm_tokens_estimate=stats.llm_tokens_estimate,
+            )
+
+        reporter.update("evaluate", "Recipe normalised successfully", 85)
+
+        if reporter.is_cancelled():
+            return PipelineResult(error="cancelled")
+
+        # Reuse the same preview / upload logic from the video pipeline
+        if config.CONFIRM_BEFORE_UPLOAD and preview is not None:
+            selected_idx = _handle_preview_confirmation(
+                preview, recipe_data, image_path, [], 0, reporter
+            )
+            if selected_idx is None:
+                return PipelineResult(
+                    error="cancelled", llm_tokens_estimate=stats.llm_tokens_estimate
+                )
+            reporter.update("upload", f"Uploading to {config.OUTPUT_TARGET}...", 92)
+        else:
+            reporter.update("upload", f"Uploading to {config.OUTPUT_TARGET}...", 92)
+
+        if reporter.is_cancelled():
+            return PipelineResult(
+                error="cancelled",
+                recipe_data=recipe_data,
+                image_path=image_path,
+                llm_tokens_estimate=stats.llm_tokens_estimate,
+            )
+
+        if skip_upload:
+            reporter.update("complete", "Recipe created (upload skipped)", 100)
+            return PipelineResult(
+                recipe_data=recipe_data,
+                image_path=image_path,
+                output_target="none",
+                llm_tokens_estimate=stats.llm_tokens_estimate,
+            )
+
+        upload_targets = (
+            ["tandoor", "mealie"] if config.EXPORT_TO_BOTH else [config.OUTPUT_TARGET]
+        )
+        if config.EXPORT_TO_BOTH:
+            reporter.update("upload", "Uploading to Tandoor and Mealie...", 92)
+
+        upload_results = []
+        for target in upload_targets:
+            try:
+                if target == "tandoor":
+                    from tandoor import Tandoor
+
+                    tandoor = Tandoor()
+                    result = tandoor.create_recipe(recipe_data)
+                    if image_path and result.get("id"):
+                        tandoor.upload_image(result["id"], image_path)
+                    upload_results.append((target, True, None))
+                elif target == "mealie":
+                    from mealie import Mealie
+
+                    mealie = Mealie()
+                    result = mealie.create_recipe(recipe_data)
+                    recipe_slug = result.get("slug") or result.get("id")
+                    if image_path and recipe_slug:
+                        mealie.upload_image(recipe_slug, image_path)
+                    upload_results.append((target, True, None))
+            except Exception as upload_error:
+                upload_results.append((target, False, str(upload_error)))
+
+        final_target = (
+            ", ".join(upload_targets) if config.EXPORT_TO_BOTH else config.OUTPUT_TARGET
+        )
+        failed = [r for r in upload_results if not r[1]]
+        if failed and len(failed) == len(upload_targets):
+            msgs = "; ".join(f"{r[0]}: {r[2]}" for r in failed)
+            return PipelineResult(
+                error=f"All uploads failed: {msgs}",
+                recipe_data=recipe_data,
+                image_path=image_path,
+                llm_tokens_estimate=stats.llm_tokens_estimate,
+            )
+
+        if failed:
+            success = [r[0] for r in upload_results if r[1]]
+            final_target = ", ".join(success)
+            failed_msgs = "; ".join(f"{r[0]}: {r[2]}" for r in failed)
+            reporter.update(
+                "complete",
+                f"Uploaded to {final_target}. Failed: {failed_msgs}",
+                100,
+            )
+        else:
+            reporter.update(
+                "complete", f"Recipe uploaded successfully to {final_target}!", 100
+            )
+
+        return PipelineResult(
+            recipe_data=recipe_data,
+            image_path=image_path,
+            output_target=final_target,
+            llm_tokens_estimate=stats.llm_tokens_estimate,
+        )
+
+    except Exception as exc:
+        return PipelineResult(
+            error=f"Error: {exc}", llm_tokens_estimate=stats.llm_tokens_estimate
+        )
+
+
+def run_url_pipeline(
+    url: str,
+    reporter: ProgressReporter,
+    *,
+    work_dir: str = "/tmp",
+    stats: PipelineStats | None = None,
+    preview: PreviewWaiter | None = None,
+    skip_upload: bool = False,
+) -> PipelineResult:
+    """Auto-detect URL type and route to the appropriate pipeline."""
+    if is_video_url(url):
+        return run_extraction_pipeline(
+            url,
+            reporter,
+            work_dir=work_dir,
+            stats=stats,
+            preview=preview,
+            skip_upload=skip_upload,
+        )
+    return run_web_recipe_pipeline(
+        url,
+        reporter,
+        work_dir=work_dir,
+        stats=stats,
+        preview=preview,
+        skip_upload=skip_upload,
+    )
 
 
 def _handle_preview_confirmation(
