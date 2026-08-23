@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}Tasks - Pick-a-Recipe{% endblock %}
+
+{% block content %}
+<div class="main-container">
+    <div class="header">
+        <h1><i class="fas fa-list-check"></i> Tasks</h1>
+        <p>Queue, running jobs and recipes waiting for your approval</p>
+    </div>
+
+    <div class="tasks-toolbar">
+        <div class="tabs" id="task-tabs">
+            <button class="tab-btn active" data-state="active">Active</button>
+            <button class="tab-btn" data-state="awaiting_approval">Needs approval
+                <span class="tab-count" data-count="awaiting_approval"></span></button>
+            <button class="tab-btn" data-state="pending">Queued
+                <span class="tab-count" data-count="queued"></span></button>
+            <button class="tab-btn" data-state="processing">Running
+                <span class="tab-count" data-count="processing"></span></button>
+            <button class="tab-btn" data-state="recent">Recent</button>
+        </div>
+        <label class="select-all-label" id="select-all-label" style="display:none;">
+            <input type="checkbox" id="select-all"> Select all
+        </label>
+    </div>
+
+    <div class="bulk-bar" id="bulk-bar" style="display:none;">
+        <span id="bulk-summary">0 selected</span>
+        <button id="bulk-approve" class="btn btn-primary btn-sm"><i class="fas fa-check"></i> Approve</button>
+        <button id="bulk-reject" class="btn btn-danger btn-sm"><i class="fas fa-times"></i> Reject</button>
+        <button id="bulk-cancel" class="btn btn-secondary btn-sm"><i class="fas fa-ban"></i> Cancel jobs</button>
+    </div>
+
+    <div class="tasks-list" id="tasks-list"></div>
+
+    <div class="tasks-empty" id="tasks-empty" style="display:none;">
+        <i class="fas fa-inbox"></i>
+        <p>Nothing here right now.</p>
+    </div>
+</div>
+
+<template id="task-card-template">
+    <div class="task-card" data-job-id="">
+        <input type="checkbox" class="task-select" aria-label="Select task">
+        <div class="task-main">
+            <div class="task-head">
+                <span class="task-status-chip"></span>
+                <h3 class="task-title">…</h3>
+                <span class="task-position chip"></span>
+                <span class="task-expiry" data-expires=""></span>
+            </div>
+            <p class="task-message"></p>
+            <div class="progress-bar-container task-progress-wrap">
+                <div class="progress-bar" style="width:0%"></div>
+                <span class="progress-text">0%</span>
+            </div>
+            <div class="approval-gallery"></div>
+            <p class="task-url"></p>
+        </div>
+        <div class="task-actions">
+            <button class="btn btn-primary btn-sm approve-btn"><i class="fas fa-check"></i> Approve</button>
+            <button class="btn btn-danger btn-sm reject-btn"><i class="fas fa-times"></i> Reject</button>
+            <button class="btn btn-secondary btn-sm cancel-btn"><i class="fas fa-ban"></i> Cancel</button>
+            <span class="priority-controls">
+                <button class="btn btn-icon prio-down" title="Move later"><i class="fas fa-arrow-down"></i></button>
+                <button class="btn btn-icon prio-up" title="Move earlier"><i class="fas fa-arrow-up"></i></button>
+            </span>
+        </div>
+    </div>
+</template>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/tasks.js') }}?v={{ static_version }}"></script>
+{% endblock %}
