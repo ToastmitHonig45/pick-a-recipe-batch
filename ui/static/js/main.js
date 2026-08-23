@@ -533,13 +533,9 @@ document.addEventListener('DOMContentLoaded', function() {
         currentPreviewJobId = data.job_id;
         selectedImageIndex = data.best_image_index || 0;
         
-        // Set target name (with dual export badge if needed)
+        // Set target name (payload carries the display label)
         if (previewTarget) {
-            if (data.export_to_both) {
-                previewTarget.innerHTML = '<span class="dual-export-badge"><i class="fas fa-sync-alt"></i> Both</span> Tandoor & Mealie';
-            } else {
-                previewTarget.textContent = data.output_target || 'recipe manager';
-            }
+            previewTarget.textContent = data.output_target || 'recipe manager';
         }
         
         // Build image candidates grid
@@ -667,8 +663,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     image_data: pending.image_data,
                     candidate_images: pending.candidate_images,
                     best_image_index: pending.best_image_index,
-                    output_target: pending.output_target,
-                    export_to_both: false  // Can be enhanced to check config
+                    output_target: pending.output_target
                 });
             }
         } catch (error) {

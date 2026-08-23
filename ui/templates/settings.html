@@ -10,10 +10,11 @@
     </div>
     
     <form method="POST" action="{{ url_for('settings') }}" class="settings-form">
-        <!-- LLM Provider Settings -->
+        <!-- AI Provider -->
         <div class="settings-section">
-            <h2><i class="fas fa-brain"></i> LLM Provider</h2>
-            
+            <h2><i class="fas fa-brain"></i> AI Provider</h2>
+            <p class="section-description">Used to turn raw video/page content into a structured recipe.</p>
+
             <div class="form-group">
                 <label for="llm_provider">Provider</label>
                 <select id="llm_provider" name="llm_provider" class="form-select">
@@ -21,112 +22,146 @@
                     <option value="gemini" {% if config.llm_provider == 'gemini' %}selected{% endif %}>Google Gemini</option>
                 </select>
             </div>
-            
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="openai_api_key">OpenAI API Key</label>
-                <input type="password" id="openai_api_key" name="openai_api_key" 
-                       value="{{ config.openai_api_key }}" placeholder="sk-..."
-                       autocomplete="off" autocapitalize="none" spellcheck="false">
-                </div>
-                <div class="form-group">
-                    <label for="openai_model">OpenAI Model</label>
-                <input type="text" id="openai_model" name="openai_model" 
-                       value="{{ config.openai_model }}" placeholder="gpt-4"
-                       autocomplete="off" autocapitalize="none" spellcheck="false">
+
+            <div class="provider-fields" data-provider="openai" {% if config.llm_provider != 'openai' %}hidden{% endif %}>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="openai_api_key">OpenAI API Key</label>
+                        <input type="password" id="openai_api_key" name="openai_api_key"
+                               value="{{ config.openai_api_key }}" placeholder="sk-..."
+                               autocomplete="off" autocapitalize="none" spellcheck="false">
+                    </div>
+                    <div class="form-group">
+                        <label for="openai_model">OpenAI Model</label>
+                        <input type="text" id="openai_model" name="openai_model"
+                               value="{{ config.openai_model }}" placeholder="gpt-4"
+                               autocomplete="off" autocapitalize="none" spellcheck="false">
+                    </div>
                 </div>
             </div>
-            
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="gemini_api_key">Gemini API Key</label>
-                <input type="password" id="gemini_api_key" name="gemini_api_key" 
-                       value="{{ config.gemini_api_key }}" placeholder="AIza..."
-                       autocomplete="off" autocapitalize="none" spellcheck="false">
-                </div>
-                <div class="form-group">
-                    <label for="gemini_model">Gemini Model</label>
-                <input type="text" id="gemini_model" name="gemini_model" 
-                       value="{{ config.gemini_model }}" placeholder="gemini-2.5-flash"
-                       autocomplete="off" autocapitalize="none" spellcheck="false">
+
+            <div class="provider-fields" data-provider="gemini" {% if config.llm_provider != 'gemini' %}hidden{% endif %}>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="gemini_api_key">Gemini API Key</label>
+                        <input type="password" id="gemini_api_key" name="gemini_api_key"
+                               value="{{ config.gemini_api_key }}" placeholder="AIza..."
+                               autocomplete="off" autocapitalize="none" spellcheck="false">
+                    </div>
+                    <div class="form-group">
+                        <label for="gemini_model">Gemini Model</label>
+                        <input type="text" id="gemini_model" name="gemini_model"
+                               value="{{ config.gemini_model }}" placeholder="gemini-2.5-flash"
+                               autocomplete="off" autocapitalize="none" spellcheck="false">
+                    </div>
                 </div>
             </div>
         </div>
-        
-        <!-- Recipe Output Settings -->
+
+        <!-- Recipe Language -->
         <div class="settings-section">
-            <h2><i class="fas fa-utensils"></i> Recipe Output</h2>
-            
+            <h2><i class="fas fa-language"></i> Recipe Language</h2>
+
             <div class="form-row">
-                <div class="form-group">
-                    <label for="output_target">Primary Output Target</label>
-                    <select id="output_target" name="output_target" class="form-select">
-                        <option value="tandoor" {% if config.output_target == 'tandoor' %}selected{% endif %}>Tandoor</option>
-                        <option value="mealie" {% if config.output_target == 'mealie' %}selected{% endif %}>Mealie</option>
-                    </select>
-                </div>
                 <div class="form-group">
                     <label for="recipe_lang">Recipe Language</label>
                     <input type="text" id="recipe_lang" name="recipe_lang"
                            value="{{ config.recipe_lang }}" placeholder="hebrew">
+                    <small class="form-hint">Language the final recipe is written in.</small>
                 </div>
                 <div class="form-group">
-                    <label for="target_language">Target Language Code</label>
+                    <label for="target_language">Transcription Code</label>
                     <input type="text" id="target_language" name="target_language"
                            value="{{ config.target_language }}" placeholder="he">
+                    <small class="form-hint">Two-letter code matching the recipe language (e.g. <code>he</code>, <code>en</code>).</small>
                 </div>
             </div>
-            
+        </div>
+
+        <!-- Recipe Export -->
+        <div class="settings-section">
+            <h2><i class="fas fa-paper-plane"></i> Recipe Export</h2>
+            <p class="section-description">Where finished recipes get uploaded. Turn each recipe manager on or off independently &mdash; enable both to send every recipe to the two of them.</p>
+
+            <div class="export-targets-grid">
+                <!-- Mealie -->
+                <div class="export-target-card {% if config.mealie_enabled != 'true' %}is-disabled{% endif %}" data-target-card>
+                    <div class="export-target-header">
+                        <span class="export-target-icon"><i class="fas fa-server"></i></span>
+                        <div class="export-target-title">
+                            <strong>Mealie</strong>
+                            <small class="export-target-status" data-target-status>Enabled</small>
+                        </div>
+                        <label class="switch" aria-label="Enable Mealie export">
+                            <input type="checkbox" class="switch-input" id="mealie_enabled"
+                                   name="mealie_enabled" data-target-toggle
+                                   {% if config.mealie_enabled == 'true' %}checked{% endif %}>
+                            <span class="switch-track"><span class="switch-knob"></span></span>
+                        </label>
+                    </div>
+                    <div class="export-target-body" data-target-body>
+                        <div class="form-group">
+                            <label for="mealie_host">Mealie URL</label>
+                            <input type="url" id="mealie_host" name="mealie_host"
+                                   value="{{ config.mealie_host }}" placeholder="http://localhost:9925"
+                                   autocomplete="off" autocapitalize="none" spellcheck="false">
+                        </div>
+                        <div class="form-group">
+                            <label for="mealie_api_key">Mealie API Key</label>
+                            <input type="password" id="mealie_api_key" name="mealie_api_key"
+                                   value="{{ config.mealie_api_key }}" placeholder="Your Mealie API key"
+                                   autocomplete="off" autocapitalize="none" spellcheck="false">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tandoor -->
+                <div class="export-target-card {% if config.tandoor_enabled != 'true' %}is-disabled{% endif %}" data-target-card>
+                    <div class="export-target-header">
+                        <span class="export-target-icon"><i class="fas fa-cloud"></i></span>
+                        <div class="export-target-title">
+                            <strong>Tandoor</strong>
+                            <small class="export-target-status" data-target-status>Enabled</small>
+                        </div>
+                        <label class="switch" aria-label="Enable Tandoor export">
+                            <input type="checkbox" class="switch-input" id="tandoor_enabled"
+                                   name="tandoor_enabled" data-target-toggle
+                                   {% if config.tandoor_enabled == 'true' %}checked{% endif %}>
+                            <span class="switch-track"><span class="switch-knob"></span></span>
+                        </label>
+                    </div>
+                    <div class="export-target-body" data-target-body>
+                        <div class="form-group">
+                            <label for="tandoor_host">Tandoor URL</label>
+                            <input type="url" id="tandoor_host" name="tandoor_host"
+                                   value="{{ config.tandoor_host }}" placeholder="https://tandoor.example.com"
+                                   autocomplete="off" autocapitalize="none" spellcheck="false">
+                        </div>
+                        <div class="form-group">
+                            <label for="tandoor_api_key">Tandoor API Key</label>
+                            <input type="password" id="tandoor_api_key" name="tandoor_api_key"
+                                   value="{{ config.tandoor_api_key }}" placeholder="Your Tandoor API key"
+                                   autocomplete="off" autocapitalize="none" spellcheck="false">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="alert alert-warning" id="no-target-warning" {% if config.mealie_enabled == 'true' or config.tandoor_enabled == 'true' %}hidden{% endif %}>
+                <i class="fas fa-exclamation-triangle"></i>
+                <strong>No recipe manager is enabled.</strong> Recipes will not be uploaded anywhere until you enable Mealie or Tandoor.
+            </div>
+
             <div class="form-group checkbox-group">
-                <label class="checkbox-label" for="export_to_both">
-                    <input type="checkbox" id="export_to_both" name="export_to_both"
-                           {% if config.export_to_both == 'true' %}checked{% endif %}>
-                    <span class="checkbox-text">Export to both Tandoor and Mealie</span>
+                <label class="checkbox-label" for="confirm_before_upload">
+                    <input type="checkbox" id="confirm_before_upload" name="confirm_before_upload"
+                           {% if config.confirm_before_upload == 'true' %}checked{% endif %}>
+                    <span class="checkbox-text">Ask me before uploading</span>
                 </label>
-                <small class="form-hint">When enabled, recipes will be uploaded to both recipe managers simultaneously. Make sure both are configured below.</small>
+                <small class="form-hint">Show a preview of the recipe first, then upload once you confirm.</small>
             </div>
         </div>
-        
-        <!-- Mealie Settings -->
-        <div class="settings-section">
-            <h2><i class="fas fa-server"></i> Mealie</h2>
-            
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="mealie_host">Mealie URL</label>
-                    <input type="url" id="mealie_host" name="mealie_host" 
-                           value="{{ config.mealie_host }}" placeholder="http://localhost:9925"
-                           autocomplete="off" autocapitalize="none" spellcheck="false">
-                </div>
-                <div class="form-group">
-                    <label for="mealie_api_key">Mealie API Key</label>
-                    <input type="password" id="mealie_api_key" name="mealie_api_key" 
-                           value="{{ config.mealie_api_key }}" placeholder="Your Mealie API key"
-                           autocomplete="off" autocapitalize="none" spellcheck="false">
-                </div>
-            </div>
-        </div>
-        
-        <!-- Tandoor Settings -->
-        <div class="settings-section">
-            <h2><i class="fas fa-cloud"></i> Tandoor</h2>
-            
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="tandoor_host">Tandoor URL</label>
-                    <input type="url" id="tandoor_host" name="tandoor_host" 
-                           value="{{ config.tandoor_host }}" placeholder="https://tandoor.example.com"
-                           autocomplete="off" autocapitalize="none" spellcheck="false">
-                </div>
-                <div class="form-group">
-                    <label for="tandoor_api_key">Tandoor API Key</label>
-                    <input type="password" id="tandoor_api_key" name="tandoor_api_key" 
-                           value="{{ config.tandoor_api_key }}" placeholder="Your Tandoor API key"
-                           autocomplete="off" autocapitalize="none" spellcheck="false">
-                </div>
-            </div>
-        </div>
-        
+
         <!-- Whisper Settings -->
         <div class="settings-section">
             <h2><i class="fas fa-microphone"></i> Whisper Transcription</h2>
@@ -212,20 +247,6 @@
                 </ol>
             </div>
         </div>
-        
-        <!-- Upload Settings -->
-        <div class="settings-section">
-            <h2><i class="fas fa-upload"></i> Upload Settings</h2>
-            
-            <div class="form-group checkbox-group">
-                <label class="checkbox-label" for="confirm_before_upload">
-                    <input type="checkbox" id="confirm_before_upload" name="confirm_before_upload"
-                           {% if config.confirm_before_upload == 'true' %}checked{% endif %}>
-                    <span class="checkbox-text">Confirm before uploading</span>
-                </label>
-                <small class="form-hint">When enabled, you'll see a preview of the recipe and must confirm before it's uploaded to Tandoor or Mealie.</small>
-            </div>
-        </div>
 
         <!-- Queue Settings -->
         <div class="settings-section">
@@ -253,30 +274,58 @@
     
     <!-- Export/Import Settings Section -->
     <div class="settings-section">
-        <h2><i class="fas fa-file-export"></i> Export / Import Settings</h2>
-        <p class="section-description">Backup your settings or transfer them to another installation.</p>
+        <h2><i class="fas fa-file-export"></i> Backup Settings</h2>
+        <p class="section-description">Download your settings as a JSON file or restore them from a previous backup.</p>
         
         <div class="form-row">
             <div class="form-group">
                 <button type="button" class="btn btn-secondary" id="export-settings-btn">
                     <i class="fas fa-download"></i>
-                    Export Settings
+                    Export
                 </button>
-                <small class="form-hint">Download your settings (API keys, URLs, preferences) as a JSON file.</small>
+                <small class="form-hint">Saves everything, including API keys, to a file on your device.</small>
             </div>
             <div class="form-group">
                 <label for="import-settings-file" class="btn btn-secondary">
                     <i class="fas fa-upload"></i>
-                    Import Settings
+                    Import
                 </label>
                 <input type="file" id="import-settings-file" accept=".json" style="display: none;">
-                <small class="form-hint">Upload a previously exported settings file.</small>
+                <small class="form-hint">Restore from a previously exported file.</small>
             </div>
         </div>
     </div>
 </div>
 
 <script>
+// ===== AI provider: show only the fields for the selected provider =====
+const providerSelect = document.getElementById('llm_provider');
+function syncProviderFields() {
+    document.querySelectorAll('.provider-fields').forEach(group => {
+        group.hidden = group.dataset.provider !== providerSelect.value;
+    });
+}
+providerSelect.addEventListener('change', syncProviderFields);
+syncProviderFields();
+
+// ===== Export targets: independent enable/disable cards =====
+function syncTargetCard(toggle) {
+    const card = toggle.closest('[data-target-card]');
+    const status = card.querySelector('[data-target-status]');
+    const enabled = toggle.checked;
+    card.classList.toggle('is-disabled', !enabled);
+    status.textContent = enabled ? 'Enabled' : 'Disabled';
+    syncNoTargetWarning();
+}
+function syncNoTargetWarning() {
+    const anyEnabled = document.querySelectorAll('[data-target-toggle]:checked').length > 0;
+    document.getElementById('no-target-warning').hidden = anyEnabled;
+}
+document.querySelectorAll('[data-target-toggle]').forEach(toggle => {
+    toggle.addEventListener('change', () => syncTargetCard(toggle));
+    syncTargetCard(toggle);
+});
+
 // Export settings functionality
 document.getElementById('export-settings-btn').addEventListener('click', async function() {
     try {
