@@ -35,6 +35,11 @@ def init_db():
     """Initialize the database with required tables."""
     with get_db() as conn:
         cursor = conn.cursor()
+
+        # WAL improves concurrent read/write behavior for the worker pool,
+        # heartbeat and sweeper threads sharing this file.
+        cursor.execute('PRAGMA journal_mode=WAL')
+        cursor.execute('PRAGMA busy_timeout=5000')
         
         # Create users table
         cursor.execute('''
@@ -151,12 +156,22 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         'retry_from_history_id': 'INTEGER',
         'llm_tokens_used': 'INTEGER DEFAULT 0',
         'queue_priority': 'INTEGER DEFAULT 0',
+        'user_id': 'TEXT',
+        'attempts': 'INTEGER DEFAULT 0',
+        'next_run_at': 'TIMESTAMP',
+        'lease_expires_at': 'TIMESTAMP',
+        'state_changed_at': 'TIMESTAMP',
     }
     for col, typedef in job_columns.items():
         try:
             cursor.execute(f'ALTER TABLE recipe_jobs ADD COLUMN {col} {typedef}')
         except sqlite3.OperationalError:
             pass
+
+    try:
+        cursor.execute('ALTER TABLE pending_uploads ADD COLUMN user_id TEXT')
+    except sqlite3.OperationalError:
+        pass
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS push_subscriptions (
@@ -280,7 +295,21 @@ def save_config(config: dict) -> bool:
 
 # ===== Job Functions =====
 
-def create_job(url: str, *, retry_from_history_id: int | None = None, priority: int = 0) -> str:
+def _owner_filter(user_id: Optional[str], is_admin: bool,
+                  column: str = 'user_id') -> tuple[str, list]:
+    """Return (sql_fragment, params) restricting rows to an owner.
+
+    Unscoped when user_id is None and is_admin is False (legacy behavior).
+    Jobs with NULL user_id remain visible to their querying scope so legacy
+    rows are never orphaned; pending_uploads uses strict equality.
+    """
+    if is_admin or not user_id:
+        return '', []
+    return f' AND ({column} IS NULL OR {column} = ?)', [user_id]
+
+
+def create_job(url: str, *, retry_from_history_id: int | None = None,
+               priority: int = 0, user_id: Optional[str] = None) -> str:
     """Create a new analysis job and return its ID."""
     job_id = str(uuid.uuid4())
     with get_db() as conn:
@@ -288,9 +317,9 @@ def create_job(url: str, *, retry_from_history_id: int | None = None, priority: 
         cursor.execute('''
             INSERT INTO recipe_jobs
             (id, url, status, progress, current_stage, stage_message,
-             retry_from_history_id, queue_priority)
-            VALUES (?, ?, 'queued', 0, 'queued', 'Waiting in queue...', ?, ?)
-        ''', (job_id, url, retry_from_history_id, priority))
+             retry_from_history_id, queue_priority, user_id)
+            VALUES (?, ?, 'queued', 0, 'queued', 'Waiting in queue...', ?, ?, ?)
+        ''', (job_id, url, retry_from_history_id, priority, user_id))
         conn.commit()
     return job_id
 
@@ -307,7 +336,12 @@ def get_queue_position(job_id: str) -> int:
             WHERE q.status = 'queued'
             AND (
                 q.queue_priority > ?
-                OR (q.queue_priority = ? AND q.rowid < (SELECT rowid FROM recipe_jobs WHERE id = ?))
+                OR (
+                    q.queue_priority = ?
+                    AND (q.created_at, q.rowid) < (
+                        SELECT created_at, rowid FROM recipe_jobs WHERE id = ?
+                    )
+                )
             )
         ''', (job.get('queue_priority', 0), job.get('queue_priority', 0), job_id))
         ahead = cursor.fetchone()[0]
@@ -321,13 +355,15 @@ def count_queued_jobs() -> int:
         return cursor.fetchone()[0]
 
 
-def get_queued_jobs() -> List[Dict[str, Any]]:
+def get_queued_jobs(*, user_id: Optional[str] = None,
+                    is_admin: bool = False) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT * FROM recipe_jobs WHERE status = 'queued'
-            ORDER BY queue_priority DESC, created_at ASC
-        ''')
+        owner_sql, owner_params = _owner_filter(user_id, is_admin)
+        cursor.execute(f'''
+            SELECT * FROM recipe_jobs WHERE status = 'queued'{owner_sql}
+            ORDER BY queue_priority DESC, created_at ASC, rowid ASC
+        ''', owner_params)
         return [dict(row) for row in cursor.fetchall()]
 
 
@@ -341,29 +377,37 @@ def update_job_tokens(job_id: str, tokens: int) -> None:
         conn.commit()
 
 
-def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+def get_job(job_id: str, *, user_id: Optional[str] = None,
+            is_admin: bool = False) -> Optional[Dict[str, Any]]:
     """Get a job by ID."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM recipe_jobs WHERE id = ?', (job_id,))
+        owner_sql, owner_params = _owner_filter(user_id, is_admin)
+        cursor.execute(
+            f'SELECT * FROM recipe_jobs WHERE id = ?{owner_sql}',
+            [job_id] + owner_params,
+        )
         row = cursor.fetchone()
         if row:
             return dict(row)
     return None
 
 
-def get_active_jobs() -> List[Dict[str, Any]]:
+def get_active_jobs(*, user_id: Optional[str] = None,
+                    is_admin: bool = False) -> List[Dict[str, Any]]:
     """Get all active (non-completed, non-failed, non-cancelled) jobs."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
+        owner_sql, owner_params = _owner_filter(user_id, is_admin)
+        cursor.execute(f'''
             SELECT * FROM recipe_jobs
-            WHERE status NOT IN ('completed', 'failed', 'cancelled')
+            WHERE status NOT IN ('completed', 'failed', 'cancelled'){owner_sql}
             ORDER BY
                 CASE WHEN status = 'queued' THEN 0 ELSE 1 END,
                 queue_priority DESC,
-                created_at ASC
-        ''')
+                created_at ASC,
+                rowid ASC
+        ''', owner_params)
         jobs = [dict(row) for row in cursor.fetchall()]
         for job in jobs:
             if job.get('status') == 'queued':
@@ -818,12 +862,195 @@ def cleanup_old_jobs(hours: int = 24) -> int:
         return cursor.rowcount
 
 
+def find_stranded_approvals() -> List[str]:
+    """Awaiting-approval jobs whose approval row resolved without them.
+
+    Catches jobs stranded between the sweeper's two writes (upload row
+    flipped, job state not yet updated) or any similar partial teardown.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT rj.id FROM recipe_jobs rj
+            WHERE rj.status = 'awaiting_approval'
+            AND NOT EXISTS (
+                SELECT 1 FROM pending_uploads pu
+                WHERE pu.job_id = rj.id AND pu.status = 'pending'
+            )
+        ''')
+        return [r['id'] for r in cursor.fetchall()]
+
+
+def extend_leases(job_ids: List[str], *, minutes: int = 10) -> int:
+    """Heartbeat: push the liveness lease forward for live workers."""
+    if not job_ids:
+        return 0
+    marks = ','.join('?' for _ in job_ids)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f'''
+            UPDATE recipe_jobs SET lease_expires_at = datetime('now', ?)
+            WHERE id IN ({marks})
+            AND status IN ('running', 'uploading')
+        ''', [f'+{int(minutes)} minutes', *job_ids])
+        conn.commit()
+        return cursor.rowcount
+
+
+def sweep_stale_leases(*, max_attempts: int = 3,
+                       backoff_base_seconds: int = 60) -> Dict[str, int]:
+    """Requeue running jobs whose worker lease lapsed; fail repeat losers."""
+    requeued = given_up = 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, attempts FROM recipe_jobs
+            WHERE status = 'running'
+            AND lease_expires_at IS NOT NULL
+            AND lease_expires_at < datetime('now')
+        ''')
+        stale = cursor.fetchall()
+        for row in stale:
+            attempts = (row['attempts'] or 0) + 1
+            if attempts <= max_attempts:
+                delay = backoff_base_seconds * (2 ** (attempts - 1))
+                cursor.execute('''
+                    UPDATE recipe_jobs SET
+                        status = 'queued',
+                        attempts = ?,
+                        next_run_at = datetime('now', ?),
+                        lease_expires_at = NULL,
+                        progress = 0,
+                        stage_message = 'Recovered; waiting to retry',
+                        error_message = 'Worker lease lost - retry scheduled',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (attempts, f'+{delay} seconds', row['id']))
+                requeued += 1
+            else:
+                cursor.execute('''
+                    UPDATE recipe_jobs SET
+                        status = 'failed',
+                        attempts = ?,
+                        lease_expires_at = NULL,
+                        error_message = 'Worker lost repeatedly; giving up',
+                        state_changed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (attempts, row['id']))
+                given_up += 1
+        conn.commit()
+    return {'requeued': requeued, 'failed': given_up}
+
+
+def expire_due_approvals() -> List[str]:
+    """Flip due pending uploads to 'expired'; return affected job ids."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, job_id FROM pending_uploads
+            WHERE status = 'pending'
+            AND expires_at IS NOT NULL
+            AND expires_at <= datetime('now')
+        ''')
+        due = cursor.fetchall()
+        if not due:
+            return []
+        ids = [r['id'] for r in due]
+        marks = ','.join('?' for _ in ids)
+        cursor.execute(
+            f"UPDATE pending_uploads SET status = 'expired' "
+            f'WHERE id IN ({marks})', ids)
+        conn.commit()
+        return [r['job_id'] for r in due]
+
+
+def list_jobs_by_states(states: List[str], *, user_id: Optional[str] = None,
+                        is_admin: bool = False, limit: int = 100,
+                        offset: int = 0,
+                        updated_since_hours: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Unified task listing across explicit status values."""
+    if not states:
+        return []
+    placeholders = ','.join('?' for _ in states)
+    owner_sql, owner_params = _owner_filter(user_id, is_admin)
+    since_sql, since_param = '', []
+    if updated_since_hours is not None:
+        since_sql = (" AND updated_at >= datetime('now', ?) ")
+        since_param = [f'-{int(updated_since_hours)} hours']
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f'''
+            SELECT * FROM recipe_jobs
+            WHERE status IN ({placeholders}){owner_sql}{since_sql}
+            ORDER BY
+                CASE WHEN status = 'queued' THEN 0 ELSE 1 END,
+                queue_priority DESC, created_at ASC, rowid ASC
+            LIMIT ? OFFSET ?
+        ''', [*states, *owner_params, *since_param, limit, offset])
+        jobs = [dict(row) for row in cursor.fetchall()]
+
+    waiting_ids = [j['id'] for j in jobs if j['status'] == 'awaiting_approval']
+    uploads_by_job: Dict[str, Dict[str, Any]] = {}
+    if waiting_ids:
+        marks = ','.join('?' for _ in waiting_ids)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'SELECT id, job_id, expires_at FROM pending_uploads '
+                f"WHERE job_id IN ({marks}) AND status = 'pending'",
+                waiting_ids,
+            )
+            uploads_by_job = {r['job_id']: dict(r) for r in cursor.fetchall()}
+
+    for job in jobs:
+        if job['status'] == 'queued':
+            job['queue_position'] = get_queue_position(job['id'])
+        if job['status'] == 'awaiting_approval' and job['id'] in uploads_by_job:
+            up = uploads_by_job[job['id']]
+            job['pending_upload_id'] = up['id']
+            job['approval_expires_at'] = up['expires_at']
+    return jobs
+
+
+def count_jobs_by_states(*, user_id: Optional[str] = None,
+                         is_admin: bool = False) -> Dict[str, int]:
+    """Status -> count map, owner-scoped."""
+    owner_sql, owner_params = _owner_filter(user_id, is_admin)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f'SELECT status, COUNT(*) AS n FROM recipe_jobs '
+            f'WHERE 1=1{owner_sql} GROUP BY status',
+            owner_params,
+        )
+        return {row['status']: row['n'] for row in cursor.fetchall()}
+
+
+def update_job_priority(job_id: str, priority: int, *,
+                        user_id: Optional[str] = None,
+                        is_admin: bool = False) -> bool:
+    """Reorder a still-queued job."""
+    owner_sql, owner_params = _owner_filter(user_id, is_admin)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE recipe_jobs SET queue_priority = ?, "
+            "updated_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND status = 'queued'" + owner_sql,
+            [priority, job_id, *owner_params],
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 # ===== Pending Upload Functions =====
 
 def create_pending_upload(upload_id: str, job_id: str, recipe_data: Dict,
                           image_path: Optional[str], image_candidates: List[str],
                           output_target: str, best_image_index: int = 0,
-                          timeout_minutes: int = 5) -> bool:
+                          timeout_minutes: int = 5,
+                          user_id: Optional[str] = None) -> bool:
     """Create a pending upload waiting for confirmation."""
     with get_db() as conn:
         cursor = conn.cursor()
@@ -832,20 +1059,27 @@ def create_pending_upload(upload_id: str, job_id: str, recipe_data: Dict,
         cursor.execute('''
             INSERT INTO pending_uploads
             (id, job_id, recipe_data, image_path, image_candidates, output_target,
-             selected_image_index, best_image_index, status, expires_at)
+             selected_image_index, best_image_index, status, expires_at, user_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending',
-                    datetime('now', '+' || ? || ' minutes'))
+                    datetime('now', '+' || ? || ' minutes'), ?)
         ''', (upload_id, job_id, recipe_json, image_path, candidates_json,
-              output_target, best_image_index, best_image_index, timeout_minutes))
+              output_target, best_image_index, best_image_index, timeout_minutes,
+              user_id))
         conn.commit()
         return True
 
 
-def get_pending_upload(upload_id: str) -> Optional[Dict[str, Any]]:
+def get_pending_upload(upload_id: str, *, user_id: Optional[str] = None,
+                       is_admin: bool = False) -> Optional[Dict[str, Any]]:
     """Get a pending upload by ID."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM pending_uploads WHERE id = ?', (upload_id,))
+        owner_sql, owner_params = _owner_filter(user_id, is_admin,
+                                                column='pu.user_id')
+        cursor.execute(
+            f'SELECT * FROM pending_uploads pu WHERE pu.id = ?{owner_sql}',
+            [upload_id] + owner_params,
+        )
         row = cursor.fetchone()
         if row:
             item = dict(row)
@@ -864,18 +1098,47 @@ def get_pending_upload(upload_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def get_pending_uploads() -> List[Dict[str, Any]]:
+def get_pending_upload_by_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Get the most recent pending upload record for a job."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT * FROM pending_uploads WHERE job_id = ? '
+            'ORDER BY created_at DESC, rowid DESC LIMIT 1',
+            (job_id,),
+        )
+        row = cursor.fetchone()
+        if row:
+            item = dict(row)
+            if item.get('recipe_data'):
+                try:
+                    item['recipe_data'] = json.loads(item['recipe_data'])
+                except json.JSONDecodeError:
+                    pass
+            if item.get('image_candidates'):
+                try:
+                    item['image_candidates'] = json.loads(item['image_candidates'])
+                except json.JSONDecodeError:
+                    item['image_candidates'] = []
+            return item
+    return None
+
+
+def get_pending_uploads(*, user_id: Optional[str] = None,
+                        is_admin: bool = False) -> List[Dict[str, Any]]:
     """Get all pending uploads that haven't expired."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
+        owner_sql, owner_params = _owner_filter(user_id, is_admin,
+                                                column='pu.user_id')
+        cursor.execute(f'''
             SELECT pu.*, rj.url, rj.video_title
             FROM pending_uploads pu
             LEFT JOIN recipe_jobs rj ON pu.job_id = rj.id
             WHERE pu.status = 'pending'
-            AND (pu.expires_at IS NULL OR pu.expires_at > datetime('now'))
+            AND (pu.expires_at IS NULL OR pu.expires_at > datetime('now')){owner_sql}
             ORDER BY pu.created_at DESC
-        ''')
+        ''', owner_params)
         results = []
         for row in cursor.fetchall():
             item = dict(row)
