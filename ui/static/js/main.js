@@ -496,7 +496,7 @@ document.addEventListener('DOMContentLoaded', function() {
         
         card.dataset.jobId = jobId;
         card.querySelector('.completed-title').textContent = recipe.name || 'Untitled Recipe';
-        card.querySelector('.view-history-btn').href = '/history';
+        card.querySelector('.view-history-btn').href = '/tasks';
         
         completedRecipes.insertBefore(card, completedRecipes.firstChild);
         

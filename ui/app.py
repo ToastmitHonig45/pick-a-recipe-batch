@@ -323,13 +323,6 @@ def job_detail(job_id):
     return render_template('job.html', job=job, max_concurrent=resolve_max_concurrent())
 
 
-@app.route('/history')
-@login_required
-def history():
-    """History page showing all past recipe extractions."""
-    return render_template('history.html')
-
-
 @app.route('/tasks')
 @login_required
 def tasks_page():
