@@ -25,12 +25,16 @@ from database import (
     delete_history_entries_bulk, delete_job_entry, delete_jobs_bulk,
     get_combined_history_and_jobs, get_combined_history_and_jobs_count,
     get_job, get_active_jobs,
-    create_pending_upload, get_pending_upload, get_pending_uploads,
-    confirm_pending_upload, cancel_pending_upload, delete_pending_upload,
+    list_jobs_by_states, count_jobs_by_states, update_job_priority,
+    get_pending_upload, get_pending_upload_by_job, get_pending_uploads,
     cleanup_expired_pending_uploads, cleanup_old_jobs,
     save_push_subscription, get_push_subscriptions, delete_push_subscription,
 )
-from job_manager import init_job_manager, get_job_manager, resolve_max_concurrent
+from job_manager import (
+    init_job_manager, get_job_manager, resolve_max_concurrent,
+    prune_artifact_dirs,
+)
+from uploaders import upload_recipe_to_targets, get_enabled_targets, format_targets
 
 app = Flask(__name__)
 
@@ -114,12 +118,34 @@ FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'false').lower() in ('true', '1', 'yes')
 
 @app.context_processor
 def inject_template_globals():
-    """Expose debug flag and static cache-bust version to templates."""
+    """Expose debug flag, cache-bust version and approvals badge count."""
     import time
     return {
         'flask_debug': FLASK_DEBUG,
         'static_version': str(int(time.time())) if FLASK_DEBUG else '7',
+        'approvals_count': _count_pending_approvals(),
     }
+
+
+def _count_pending_approvals() -> int:
+    """Live count for the sidebar badge, scoped to the signed-in user."""
+    if not _is_logged_in():
+        return 0
+    try:
+        from database import get_db
+        params = []
+        sql = ("SELECT COUNT(*) FROM pending_uploads "
+               "WHERE status = 'pending' "
+               "AND (expires_at IS NULL OR expires_at > datetime('now'))")
+        if not _current_user_is_admin():
+            sql += ' AND (user_id IS NULL OR user_id = ?)'
+            params.append(session.get('user'))
+        with get_db() as conn:
+            return conn.execute(sql, params).fetchone()[0]
+    except Exception as exc:
+        print(f'[Badge] approvals count failed: {exc}')
+        return 0
+
 
 # Use threading mode instead of eventlet to avoid monkey-patching issues with SSL/requests
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
@@ -166,9 +192,6 @@ else:
     print('[Auth] WARNING: AUTHENTIK_CLIENT_ID / AUTHENTIK_CLIENT_SECRET are not set — '
           'sign-in is disabled until Authentik OIDC credentials are configured.')
 
-# Store pending recipe uploads waiting for confirmation
-pending_uploads = {}
-
 
 def _is_logged_in() -> bool:
     return 'user' in session
@@ -176,6 +199,11 @@ def _is_logged_in() -> bool:
 
 def _current_user_is_admin() -> bool:
     return bool(session.get('is_admin'))
+
+
+def _scope() -> tuple[str | None, bool]:
+    """Owner scope for the current request: (user_id, is_admin)."""
+    return session.get('user'), _current_user_is_admin()
 
 
 def login_required(f):
@@ -202,9 +230,15 @@ def _socketio_authenticated() -> bool:
     return _is_logged_in()
 
 
-def _start_job_for_url(url: str, *, retry_from_history_id: int | None = None, priority: int = 0) -> dict:
+def _start_job_for_url(url: str, *, retry_from_history_id: int | None = None,
+                       priority: int = 0, user_id: str | None = None) -> dict:
     jm = get_job_manager()
-    job_id = jm.create_new_job(url, retry_from_history_id=retry_from_history_id, priority=priority)
+    if user_id is None:
+        user_id = session.get('user')
+    job_id = jm.create_new_job(
+        url, retry_from_history_id=retry_from_history_id,
+        priority=priority, user_id=user_id,
+    )
     jm.start_job(job_id, process_video_job)
     job = get_job(job_id)
     return {
@@ -230,6 +264,7 @@ def _run_cleanup_scheduler() -> None:
             try:
                 cleanup_old_jobs(hours=72)
                 cleanup_expired_pending_uploads()
+                prune_artifact_dirs()
             except Exception as exc:
                 print(f"[Cleanup] error: {exc}")
 
@@ -293,6 +328,13 @@ def job_detail(job_id):
 def history():
     """History page showing all past recipe extractions."""
     return render_template('history.html')
+
+
+@app.route('/tasks')
+@login_required
+def tasks_page():
+    """Tasks dashboard: queue, running and approval-parked jobs."""
+    return render_template('tasks.html')
 
 
 @app.route('/share', methods=['GET', 'POST'])
@@ -474,8 +516,8 @@ def settings():
         config['tandoor_api_key'] = request.form.get('tandoor_api_key', '')
         config['tandoor_host'] = request.form.get('tandoor_host', '')
         config['target_language'] = request.form.get('target_language', 'he')
-        config['output_target'] = request.form.get('output_target', 'tandoor')
-        config['export_to_both'] = 'true' if request.form.get('export_to_both') else 'false'
+        config['tandoor_enabled'] = 'true' if request.form.get('tandoor_enabled') else 'false'
+        config['mealie_enabled'] = 'true' if request.form.get('mealie_enabled') else 'false'
         config['whisper_model'] = request.form.get('whisper_model', 'small')
         config['hf_token'] = request.form.get('hf_token', '')
         config['yt_dlp_cookies_file'] = request.form.get('yt_dlp_cookies_file', '')
@@ -550,6 +592,7 @@ def retry_job():
         url,
         retry_from_history_id=int(history_id) if history_id else None,
         priority=1,
+        user_id=session['user'],
     )
     result['auto_start'] = True
     return jsonify(result)
@@ -565,8 +608,9 @@ def queue_stats():
 @app.route('/api/jobs', methods=['GET'])
 @api_login_required
 def list_jobs():
-    """List all active jobs."""
-    jobs = get_active_jobs()
+    """List all active jobs visible to the requesting user."""
+    user_id, is_admin = _scope()
+    jobs = get_active_jobs(user_id=user_id, is_admin=is_admin)
     return jsonify({'jobs': jobs})
 
 
@@ -574,7 +618,9 @@ def list_jobs():
 @api_login_required
 def get_job_status(job_id):
     """Get status of a specific job."""
-    job = get_job(job_id)
+    jm = get_job_manager()
+    user_id, is_admin = _scope()
+    job = jm.get_job_status(job_id, user_id=user_id, is_admin=is_admin)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
     return jsonify(job)
@@ -585,10 +631,125 @@ def get_job_status(job_id):
 def cancel_job_api(job_id):
     """Cancel a running job."""
     jm = get_job_manager()
+    user_id, is_admin = _scope()
+    job = get_job(job_id, user_id=user_id, is_admin=is_admin)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
     result = jm.cancel_job(job_id)
     if result:
         return jsonify({'status': 'cancelled', 'job_id': job_id})
     return jsonify({'error': 'Job not found or already completed'}), 404
+
+
+_TASK_STATE_GROUPS = {
+    'pending': ['queued'],
+    'processing': ['running', 'uploading'],
+    'awaiting_approval': ['awaiting_approval'],
+    'active': ['queued', 'running', 'awaiting_approval', 'uploading'],
+}
+_ALL_STATES = ['queued', 'running', 'awaiting_approval', 'uploading',
+               'completed', 'failed', 'cancelled', 'expired']
+
+
+@app.route('/api/tasks', methods=['GET'])
+@api_login_required
+def list_tasks():
+    """Unified task listing for the dashboard."""
+    user_id, is_admin = _scope()
+    scope = request.args.get('scope', 'mine')
+    if scope == 'all' and not is_admin:
+        return jsonify({'error': 'Admin access required'}), 403
+
+    state = request.args.get('state', 'active')
+    limit = min(request.args.get('limit', 100, type=int), 500)
+    offset = max(request.args.get('offset', 0, type=int), 0)
+
+    scoped_user = None if scope == 'all' else user_id
+    if state == 'recent':
+        states = ['completed', 'failed', 'cancelled', 'expired']
+    elif state == 'all':
+        states = _ALL_STATES
+    else:
+        states = _TASK_STATE_GROUPS.get(state)
+        if states is None:
+            return jsonify({'error': f'Unknown state: {state}'}), 400
+
+    tasks = list_jobs_by_states(
+        states,
+        user_id=scoped_user, is_admin=is_admin,
+        limit=limit, offset=offset,
+        updated_since_hours=72 if state == 'recent' else None,
+    )
+    counts = count_jobs_by_states(user_id=scoped_user, is_admin=is_admin)
+    return jsonify({'tasks': tasks, 'counts': counts})
+
+
+@app.route('/api/tasks/bulk', methods=['POST'])
+@api_login_required
+def bulk_task_action():
+    """Apply an action to many jobs at once: cancel | approve | reject."""
+    data = request.get_json() or {}
+    action = data.get('action')
+    ids = data.get('ids') or []
+    if action not in ('cancel', 'approve', 'reject'):
+        return jsonify({'error': 'action must be cancel, approve or reject'}), 400
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'error': 'ids must be a non-empty list'}), 400
+
+    jm = get_job_manager()
+    user_id, is_admin = _scope()
+    results = []
+    for raw_id in ids[:100]:
+        job_id = str(raw_id)
+        job = get_job(job_id, user_id=user_id, is_admin=is_admin)
+        if not job:
+            results.append({'id': job_id, 'ok': False, 'error': 'not found'})
+            continue
+        if action == 'cancel':
+            ok = jm.cancel_job(job['id'])
+            results.append({'id': job['id'], 'ok': bool(ok),
+                            **({} if ok else {'error': 'not cancellable'})})
+            continue
+
+        upload = get_pending_upload_by_job(job['id'])
+        if not upload or upload['status'] != 'pending':
+            results.append({'id': job['id'], 'ok': False,
+                            'error': 'no pending approval'})
+            continue
+        outcome = (jm.confirm_approval(upload['id'])
+                   if action == 'approve' else jm.reject_approval(upload['id']))
+        entry = {'id': job['id'], 'ok': bool(outcome.get('ok'))}
+        if not outcome.get('ok'):
+            entry['error'] = outcome.get('error')
+        results.append(entry)
+
+    succeeded = sum(1 for r in results if r['ok'])
+    return jsonify({'results': results, 'succeeded': succeeded,
+                    'failed': len(results) - succeeded})
+
+
+@app.route('/api/jobs/<job_id>/priority', methods=['PATCH'])
+@api_login_required
+def set_job_priority(job_id):
+    """Reposition a queued job."""
+    data = request.get_json() or {}
+    try:
+        priority = int(data.get('priority'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'priority must be an integer'}), 400
+
+    user_id, is_admin = _scope()
+    job = get_job(job_id, user_id=user_id, is_admin=is_admin)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    if job['status'] != 'queued':
+        return jsonify({'error': 'Only queued jobs can be reordered'}), 409
+
+    if not update_job_priority(job_id, priority,
+                               user_id=user_id, is_admin=is_admin):
+        return jsonify({'error': 'Job not found'}), 404
+    get_job_manager().refresh_queue_positions()
+    return jsonify({'job_id': job_id, 'priority': priority})
 
 
 # ===== History API Endpoints =====
@@ -654,7 +815,14 @@ def bulk_delete_history():
         deleted_history = delete_history_entries_bulk(history_ids)
     
     if job_ids:
-        deleted_jobs = delete_jobs_bulk(job_ids)
+        # Ownership gate: silently skip jobs the caller may not touch.
+        user_id, is_admin = _scope()
+        owned = [
+            str(jid) for jid in job_ids
+            if get_job(str(jid), user_id=user_id, is_admin=is_admin)
+        ]
+        if owned:
+            deleted_jobs = delete_jobs_bulk(owned)
     
     total_deleted = deleted_history + deleted_jobs
     return jsonify({
@@ -695,6 +863,9 @@ def get_recipes_api():
 @api_login_required
 def delete_job_api(job_id):
     """Delete a job entry (for cancelled/failed jobs that aren't in history)."""
+    user_id, is_admin = _scope()
+    if not get_job(job_id, user_id=user_id, is_admin=is_admin):
+        return jsonify({'error': 'Job not found'}), 404
     result = delete_job_entry(job_id)
     if result:
         return jsonify({'status': 'deleted', 'job_id': job_id})
@@ -750,9 +921,10 @@ def reupload_recipe(history_id):
     
     recipe_data = item['recipe_data']
 
-    # Get target from request or use default
+    # Get target from request or use the first enabled one
     data = request.get_json() or {}
-    target = data.get('target', config.OUTPUT_TARGET)
+    enabled = get_enabled_targets()
+    target = data.get('target', enabled[0] if enabled else '')
 
     # The original image lives under /tmp, which is not persisted across
     # container restarts. Fall back to the base64 copy kept in history so the
@@ -777,7 +949,9 @@ def reupload_recipe(history_id):
             if image_path and recipe_slug:
                 image_uploaded = bool(mealie.upload_image(recipe_slug, image_path))
         else:
-            return jsonify({'error': f'Unknown target: {target}'}), 400
+            hint = ('no recipe manager is enabled — enable Mealie and/or '
+                    'Tandoor in Settings') if not target else f'Unknown target: {target}'
+            return jsonify({'error': hint}), 400
 
         message = f'Recipe re-uploaded to {target}'
         if image_path and not image_uploaded:
@@ -951,14 +1125,17 @@ def delete_cookies_file():
 @app.route('/api/pending-uploads', methods=['GET'])
 @api_login_required
 def get_pending_uploads_api():
-    """Get all pending recipe uploads waiting for confirmation.
-    
-    This allows any device/session to see pending uploads and confirm/cancel them.
+    """Get pending recipe uploads waiting for confirmation, scoped to the
+    requesting user (admins see all).
+
+    This allows any device/session of the owner to see pending uploads and
+    confirm/cancel them.
     """
     # Clean up expired uploads first
     cleanup_expired_pending_uploads()
-    
-    pending = get_pending_uploads()
+    jm = get_job_manager()
+    user_id, is_admin = _scope()
+    pending = jm.get_approvals(user_id=user_id, is_admin=is_admin)
     
     # Prepare response with image data for each pending upload
     results = []
@@ -967,7 +1144,7 @@ def get_pending_uploads_api():
             'upload_id': upload['id'],
             'job_id': upload['job_id'],
             'recipe': upload['recipe_data'],
-            'output_target': upload['output_target'],
+            'output_target': _display_target(upload.get('output_target')),
             'best_image_index': upload.get('best_image_index', 0),
             'selected_image_index': upload.get('selected_image_index', 0),
             'url': upload.get('url'),
@@ -983,7 +1160,7 @@ def get_pending_uploads_api():
                 item['image_data'] = base64.b64encode(f.read()).decode('utf-8')
         
         # Load candidate images
-        image_candidates = upload.get('image_candidates', [])
+        image_candidates = upload.get('image_candidates') or []
         candidate_images_data = []
         for idx, candidate_path in enumerate(image_candidates):
             if os.path.exists(candidate_path):
@@ -995,9 +1172,9 @@ def get_pending_uploads_api():
                         'is_best': idx == upload.get('best_image_index', 0)
                     })
         item['candidate_images'] = candidate_images_data
-        
+
         results.append(item)
-    
+
     return jsonify({'pending_uploads': results})
 
 
@@ -1005,7 +1182,8 @@ def get_pending_uploads_api():
 @api_login_required
 def get_pending_upload_api(upload_id):
     """Get a specific pending upload by ID."""
-    upload = get_pending_upload(upload_id)
+    user_id, is_admin = _scope()
+    upload = get_pending_upload(upload_id, user_id=user_id, is_admin=is_admin)
     if not upload or upload['status'] != 'pending':
         return jsonify({'error': 'Pending upload not found'}), 404
     
@@ -1013,7 +1191,7 @@ def get_pending_upload_api(upload_id):
         'upload_id': upload['id'],
         'job_id': upload['job_id'],
         'recipe': upload['recipe_data'],
-        'output_target': upload['output_target'],
+        'output_target': _display_target(upload.get('output_target')),
         'best_image_index': upload.get('best_image_index', 0),
         'selected_image_index': upload.get('selected_image_index', 0),
         'created_at': upload.get('created_at'),
@@ -1027,10 +1205,10 @@ def get_pending_upload_api(upload_id):
             item['image_data'] = base64.b64encode(f.read()).decode('utf-8')
     
     # Load candidate images
-    image_candidates = upload.get('image_candidates', [])
+    image_candidates = upload.get('image_candidates') or []
     candidate_images_data = []
     for idx, candidate_path in enumerate(image_candidates):
-        if os.path.exists(candidate_path):
+        if candidate_path and os.path.exists(candidate_path):
             with open(candidate_path, 'rb') as f:
                 candidate_images_data.append({
                     'index': idx,
@@ -1039,7 +1217,7 @@ def get_pending_upload_api(upload_id):
                     'is_best': idx == upload.get('best_image_index', 0)
                 })
     item['candidate_images'] = candidate_images_data
-    
+
     return jsonify(item)
 
 
@@ -1049,37 +1227,35 @@ def confirm_pending_upload_api(upload_id):
     """Confirm a pending upload via REST API (works from any device/session)."""
     data = request.get_json() or {}
     selected_image_index = data.get('selected_image_index')
-    
-    # Update database
-    result = confirm_pending_upload(upload_id, selected_image_index)
-    if not result:
+
+    user_id, is_admin = _scope()
+    upload = get_pending_upload(upload_id, user_id=user_id, is_admin=is_admin)
+    if not upload:
         return jsonify({'error': 'Pending upload not found or already processed'}), 404
-    
-    # Also trigger the in-memory event if it exists (for the waiting thread)
-    if upload_id in pending_uploads:
-        pending_uploads[upload_id]['confirmed'] = True
-        if selected_image_index is not None:
-            pending_uploads[upload_id]['selected_image_index'] = selected_image_index
-        pending_uploads[upload_id]['event'].set()
-    
-    return jsonify({'status': 'confirmed', 'upload_id': upload_id})
+
+    jm = get_job_manager()
+    result = jm.confirm_approval(upload_id, selected_image_index)
+    if not result.get('ok'):
+        return jsonify({'error': result.get('error', 'Already processed')}), 404
+    return jsonify({'status': 'confirmed', 'upload_id': upload_id,
+                    'job_id': result.get('job_id')})
 
 
 @app.route('/api/pending-uploads/<upload_id>/cancel', methods=['POST'])
 @api_login_required
 def cancel_pending_upload_api(upload_id):
     """Cancel a pending upload via REST API (works from any device/session)."""
-    # Update database
-    result = cancel_pending_upload(upload_id)
-    if not result:
+    user_id, is_admin = _scope()
+    upload = get_pending_upload(upload_id, user_id=user_id, is_admin=is_admin)
+    if not upload:
         return jsonify({'error': 'Pending upload not found or already processed'}), 404
-    
-    # Also trigger the in-memory event if it exists (for the waiting thread)
-    if upload_id in pending_uploads:
-        pending_uploads[upload_id]['confirmed'] = False
-        pending_uploads[upload_id]['event'].set()
-    
-    return jsonify({'status': 'cancelled', 'upload_id': upload_id})
+
+    jm = get_job_manager()
+    result = jm.reject_approval(upload_id)
+    if not result.get('ok'):
+        return jsonify({'error': result.get('error', 'Already processed')}), 404
+    return jsonify({'status': 'cancelled', 'upload_id': upload_id,
+                    'job_id': result.get('job_id')})
 
 
 # ===== Legacy API (kept for backward compatibility) =====
@@ -1119,6 +1295,92 @@ def process_video():
     return jsonify({'status': 'started', 'message': 'Processing started', **result})
 
 
+def _emit_preview_payload(payload: dict) -> None:
+    """Emit a recipe preview only to the owning user's rooms."""
+    rooms = [f"job_{payload.get('job_id')}"]
+    owner = payload.get('owner')
+    if owner:
+        rooms.append(f'user_{owner}')
+    for room in rooms:
+        socketio.emit('recipe_preview', payload, room=room)
+
+
+def _display_target(raw: str | None) -> str:
+    """Pretty label for a stored output_target (legacy keys or new labels)."""
+    from uploaders import TARGET_LABELS
+    if not raw:
+        return 'recipe manager'
+    return TARGET_LABELS.get(raw.strip().lower(), raw)
+
+
+def _build_preview_payload(upload: dict) -> dict:
+    """Reconstruct a recipe_preview payload from a stored pending upload."""
+    item = {
+        'job_id': upload['job_id'],
+        'upload_id': upload['id'],
+        'recipe': upload.get('recipe_data'),
+        'image_data': None,
+        'candidate_images': [],
+        'best_image_index': upload.get('best_image_index', 0),
+        'output_target': _display_target(upload.get('output_target')),
+        'owner': upload.get('user_id'),
+    }
+    image_path = upload.get('image_path')
+    if image_path and os.path.exists(image_path):
+        with open(image_path, 'rb') as f:
+            item['image_data'] = base64.b64encode(f.read()).decode('utf-8')
+    for idx, candidate_path in enumerate(upload.get('image_candidates') or []):
+        if candidate_path and os.path.exists(candidate_path):
+            with open(candidate_path, 'rb') as f:
+                item['candidate_images'].append({
+                    'index': idx,
+                    'data': base64.b64encode(f.read()).decode('utf-8'),
+                    'path': candidate_path,
+                    'is_best': idx == upload.get('best_image_index', 0),
+                })
+    return item
+
+
+def resume_upload_job(job_id: str, jm) -> None:
+    """Upload-phase worker: push an approved artifact to its targets."""
+    upload = get_pending_upload_by_job(job_id)
+    job = get_job(job_id)
+    if not upload or not job or job['status'] != 'uploading':
+        return
+
+    recipe_data = upload.get('recipe_data')
+    if not recipe_data:
+        jm.fail_job(job_id, 'Approved recipe artifact is missing or corrupt')
+        return
+
+    jm.update_progress(job_id, 'upload',
+                       f"Uploading to {upload.get('output_target') or 'recipe manager'}...", 95)
+
+    candidates = upload.get('image_candidates') or []
+    selected = upload.get('selected_image_index', upload.get('best_image_index', 0)) or 0
+    image_path = upload.get('image_path')
+    if candidates and 0 <= selected < len(candidates):
+        image_path = candidates[selected]
+
+    target_count = len(get_enabled_targets())
+    final_target, failures = upload_recipe_to_targets(recipe_data, image_path)
+
+    if failures and len(failures) == target_count:
+        msgs = '; '.join(f"{t}: {msg}" for t, msg in failures)
+        jm.fail_job(job_id, f'All uploads failed: {msgs}')
+        return
+
+    if failures:
+        msgs = '; '.join(f"{t}: {msg}" for t, msg in failures)
+        jm.update_progress(job_id, 'complete',
+                           f'Uploaded to {final_target}. Failed: {msgs}', 100)
+    else:
+        jm.update_progress(job_id, 'complete',
+                           f'Recipe uploaded successfully to {final_target}!', 100)
+
+    jm.complete_job(job_id, recipe_data, image_path, final_target)
+
+
 def process_video_job(job_id, jm):
     """Background task — delegates to shared pipeline module."""
     from pipeline import (
@@ -1146,48 +1408,26 @@ def process_video_job(job_id, jm):
     preview = None
     if app_config.CONFIRM_BEFORE_UPLOAD:
         def emit_preview(payload):
-            socketio.emit('recipe_preview', payload, room=f'job_{job_id}')
-            socketio.emit('recipe_preview', payload)
-
-        def emit_cancelled():
-            socketio.emit('recipe_cancelled', {
-                'job_id': job_id,
-                'message': 'Recipe upload was cancelled',
-            }, room=f'job_{job_id}')
-            socketio.emit('recipe_cancelled', {
-                'job_id': job_id,
-                'message': 'Recipe upload was cancelled',
-            })
+            payload['owner'] = job.get('user_id')
+            _emit_preview_payload(payload)
 
         preview = PreviewWaiter(
             job_id=job_id,
-            recipe_data={},
-            image_path=None,
-            image_candidates=[],
-            best_image_index=0,
-            output_target=app_config.OUTPUT_TARGET,
-            export_to_both=app_config.EXPORT_TO_BOTH,
+            target_label=format_targets(get_enabled_targets()),
             emit_preview=emit_preview,
-            wait_for_confirmation=lambda *a, **k: (False, 0),
-            pending_uploads=pending_uploads,
-            create_pending_upload_fn=create_pending_upload,
-            get_pending_upload_fn=get_pending_upload,
-            delete_pending_upload_fn=delete_pending_upload,
-            is_cancelled=lambda: jm.is_cancelled(job_id),
-            socketio_emit_cancelled=emit_cancelled,
+            open_approval_fn=lambda **kw: jm.open_approval(**kw),
         )
 
     result = run_url_pipeline(job['url'], reporter, stats=stats, preview=preview)
 
+    if result.awaiting_approval:
+        # Slot-free approval: worker returns; the slot is now free and the
+        # upload happens in a fresh worker once the user approves.
+        return
     if result.error == 'cancelled':
         return
     if result.error:
-        if 'confirmation timed out' in (result.error or '').lower():
-            jm.fail_job(job_id, 'Upload confirmation timed out', stats.llm_tokens_estimate)
-        elif 'cancelled' in (result.error or '').lower():
-            jm.update_progress(job_id, 'cancelled', 'Upload cancelled by user', 100)
-        else:
-            jm.fail_job(job_id, result.error, stats.llm_tokens_estimate)
+        jm.fail_job(job_id, result.error, stats.llm_tokens_estimate)
         return
 
     jm.complete_job(
@@ -1205,6 +1445,7 @@ def process_video_job(job_id, jm):
 def handle_connect():
     if not _socketio_authenticated():
         return False
+    join_room(f"user_{session['user']}")
     emit('connected', {'status': 'Connected to server'})
 
 
@@ -1214,7 +1455,8 @@ def handle_subscribe_job(data):
         return False
     job_id = data.get('job_id')
     if job_id:
-        job = get_job(job_id)
+        user_id, is_admin = session.get('user'), _current_user_is_admin()
+        job = get_job(job_id, user_id=user_id, is_admin=is_admin)
         if not job:
             emit('error', {'message': 'Job not found'})
             return
@@ -1238,12 +1480,14 @@ def handle_confirm_upload(data):
         return False
     upload_id = data.get('upload_id')
     selected_image_index = data.get('selected_image_index')
-    if upload_id and upload_id in pending_uploads:
-        pending_uploads[upload_id]['confirmed'] = True
-        # Store the user's selected image index if provided
-        if selected_image_index is not None:
-            pending_uploads[upload_id]['selected_image_index'] = selected_image_index
-        pending_uploads[upload_id]['event'].set()
+    if not upload_id:
+        return
+    user_id, is_admin = session.get('user'), _current_user_is_admin()
+    upload = get_pending_upload(upload_id, user_id=user_id, is_admin=is_admin)
+    if not upload:
+        emit('error', {'message': 'Pending upload not found'})
+        return
+    get_job_manager().confirm_approval(upload_id, selected_image_index)
 
 
 @socketio.on('cancel_upload')
@@ -1251,13 +1495,32 @@ def handle_cancel_upload(data):
     if not _socketio_authenticated():
         return False
     upload_id = data.get('upload_id')
-    if upload_id and upload_id in pending_uploads:
-        pending_uploads[upload_id]['confirmed'] = False
-        pending_uploads[upload_id]['event'].set()
+    if not upload_id:
+        return
+    user_id, is_admin = session.get('user'), _current_user_is_admin()
+    upload = get_pending_upload(upload_id, user_id=user_id, is_admin=is_admin)
+    if not upload:
+        emit('error', {'message': 'Pending upload not found'})
+        return
+    get_job_manager().reject_approval(upload_id)
 
 
 # Register pipeline handler and restore queued jobs from DB
 job_manager.set_process_func(process_video_job)
+job_manager.set_resume_func(resume_upload_job)
+
+
+def _reemit_parked_previews() -> None:
+    """After a restart, re-emit previews for jobs parked in awaiting_approval."""
+    jm = get_job_manager()
+    try:
+        for upload in jm.get_approvals():
+            _emit_preview_payload(_build_preview_payload(upload))
+    except Exception as exc:
+        print(f'[Jobs] failed to re-emit parked previews: {exc}')
+
+
+_reemit_parked_previews()
 
 
 if __name__ == '__main__':

@@ -39,6 +39,12 @@
             <a href="{{ url_for('settings') }}" class="nav-link {% if request.endpoint == 'settings' %}active{% endif %}" title="Settings">
                 <i class="fas fa-cog"></i>
             </a>
+            <a href="{{ url_for('tasks_page') }}" class="nav-link {% if request.endpoint == 'tasks_page' %}active{% endif %}" title="Tasks">
+                <i class="fas fa-list-check"></i>
+                {% if approvals_count %}
+                <span class="nav-badge" id="approvals-badge">{{ approvals_count }}</span>
+                {% endif %}
+            </a>
         </div>
         <div class="sidebar-bottom">
             <a href="{{ url_for('logout') }}" class="nav-link" title="Logout">

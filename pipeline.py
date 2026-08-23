@@ -10,15 +10,17 @@ from __future__ import annotations
 
 import base64
 import os
-import secrets
-import threading
-import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Protocol
+from dataclasses import dataclass
+from typing import Callable, Optional, Protocol
 
 from config import config
 from image_extractor import extract_dish_image_candidates
 from transcriber import Transcriber
+from uploaders import (
+    format_targets,
+    get_enabled_targets,
+    upload_recipe_to_targets,
+)
 from video_downloader import VideoDownloader
 from web_recipe_fetcher import is_video_url, fetch_web_recipe, download_image
 
@@ -35,6 +37,7 @@ class PipelineResult:
     output_target: str = ""
     llm_tokens_estimate: int = 0
     error: str | None = None
+    awaiting_approval: bool = False
 
 
 @dataclass
@@ -48,23 +51,25 @@ class PipelineStats:
 
 @dataclass
 class PreviewWaiter:
-    """Handles optional confirm-before-upload flow."""
+    """Slot-free approval handoff: persists the artifact via open_approval_fn
+    and emits the preview; the worker thread returns immediately afterwards."""
 
     job_id: str
-    recipe_data: dict
-    image_path: str | None
-    image_candidates: list
-    best_image_index: int
-    output_target: str
-    export_to_both: bool
+    target_label: str
     emit_preview: Callable[[dict], None]
-    wait_for_confirmation: Callable[[str, threading.Event, int], tuple[bool, int]]
-    pending_uploads: dict
-    create_pending_upload_fn: Callable
-    get_pending_upload_fn: Callable
-    delete_pending_upload_fn: Callable
+    open_approval_fn: Callable[..., Optional[str]]
     is_cancelled: Callable[[], bool]
-    socketio_emit_cancelled: Callable[[], None]
+
+
+def _no_target_result(recipe_data, image_path, stats) -> PipelineResult:
+    """Result for the 'nothing enabled in Settings' failure case."""
+    return PipelineResult(
+        error='No recipe manager is enabled — enable Mealie and/or Tandoor '
+              'in Settings',
+        recipe_data=recipe_data,
+        image_path=image_path,
+        llm_tokens_estimate=stats.llm_tokens_estimate,
+    )
 
 
 def run_extraction_pipeline(
@@ -195,15 +200,21 @@ def run_extraction_pipeline(
             return PipelineResult(error="cancelled")
 
         if config.CONFIRM_BEFORE_UPLOAD and preview is not None:
-            selected_idx = _handle_preview_confirmation(preview, recipe_data, image_path,
-                                                        image_candidates, best_image_index, reporter)
-            if selected_idx is None:
-                return PipelineResult(error="cancelled", llm_tokens_estimate=stats.llm_tokens_estimate)
-            if image_candidates and 0 <= selected_idx < len(image_candidates):
-                image_path = image_candidates[selected_idx]
-            reporter.update("upload", f"Uploading to {config.OUTPUT_TARGET}...", 95)
-        else:
-            reporter.update("upload", f"Uploading to {config.OUTPUT_TARGET}...", 95)
+            _open_preview_approval(preview, recipe_data, image_path,
+                                   image_candidates, best_image_index, reporter)
+            return PipelineResult(
+                awaiting_approval=True,
+                recipe_data=recipe_data,
+                image_path=image_path,
+                llm_tokens_estimate=stats.llm_tokens_estimate,
+            )
+
+        upload_targets = get_enabled_targets()
+        if not upload_targets:
+            return _no_target_result(recipe_data, image_path, stats)
+
+        reporter.update('upload',
+                        f'Uploading to {format_targets(upload_targets)}...', 95)
 
         if reporter.is_cancelled():
             return PipelineResult(error="cancelled", recipe_data=recipe_data, image_path=image_path,
@@ -218,42 +229,14 @@ def run_extraction_pipeline(
                 llm_tokens_estimate=stats.llm_tokens_estimate,
             )
 
-        upload_targets = ["tandoor", "mealie"] if config.EXPORT_TO_BOTH else [config.OUTPUT_TARGET]
-        if config.EXPORT_TO_BOTH:
-            reporter.update("upload", "Uploading to Tandoor and Mealie...", 95)
-
-        upload_results = []
-        for target in upload_targets:
-            try:
-                if target == "tandoor":
-                    from tandoor import Tandoor
-                    tandoor = Tandoor()
-                    result = tandoor.create_recipe(recipe_data)
-                    if image_path and result.get("id"):
-                        tandoor.upload_image(result["id"], image_path)
-                    upload_results.append((target, True, None))
-                elif target == "mealie":
-                    from mealie import Mealie
-                    mealie = Mealie()
-                    result = mealie.create_recipe(recipe_data)
-                    recipe_slug = result.get("slug") or result.get("id")
-                    if image_path and recipe_slug:
-                        mealie.upload_image(recipe_slug, image_path)
-                    upload_results.append((target, True, None))
-            except Exception as upload_error:
-                upload_results.append((target, False, str(upload_error)))
-
-        final_target = ", ".join(upload_targets) if config.EXPORT_TO_BOTH else config.OUTPUT_TARGET
-        failed = [r for r in upload_results if not r[1]]
-        if failed and len(failed) == len(upload_targets):
-            msgs = "; ".join(f"{r[0]}: {r[2]}" for r in failed)
+        final_target, failures = upload_recipe_to_targets(recipe_data, image_path)
+        if failures and len(failures) == len(upload_targets):
+            msgs = "; ".join(f"{t}: {msg}" for t, msg in failures)
             return PipelineResult(error=f"All uploads failed: {msgs}", recipe_data=recipe_data,
                                   image_path=image_path, llm_tokens_estimate=stats.llm_tokens_estimate)
 
-        if failed:
-            success = [r[0] for r in upload_results if r[1]]
-            final_target = ", ".join(success)
-            failed_msgs = "; ".join(f"{r[0]}: {r[2]}" for r in failed)
+        if failures:
+            failed_msgs = "; ".join(f"{t}: {msg}" for t, msg in failures)
             reporter.update(
                 "complete",
                 f"Uploaded to {final_target}. Failed: {failed_msgs}",
@@ -346,16 +329,22 @@ def run_web_recipe_pipeline(
 
         # Reuse the same preview / upload logic from the video pipeline
         if config.CONFIRM_BEFORE_UPLOAD and preview is not None:
-            selected_idx = _handle_preview_confirmation(
+            _open_preview_approval(
                 preview, recipe_data, image_path, [], 0, reporter
             )
-            if selected_idx is None:
-                return PipelineResult(
-                    error="cancelled", llm_tokens_estimate=stats.llm_tokens_estimate
-                )
-            reporter.update("upload", f"Uploading to {config.OUTPUT_TARGET}...", 92)
-        else:
-            reporter.update("upload", f"Uploading to {config.OUTPUT_TARGET}...", 92)
+            return PipelineResult(
+                awaiting_approval=True,
+                recipe_data=recipe_data,
+                image_path=image_path,
+                llm_tokens_estimate=stats.llm_tokens_estimate,
+            )
+
+        upload_targets = get_enabled_targets()
+        if not upload_targets:
+            return _no_target_result(recipe_data, image_path, stats)
+
+        reporter.update("upload",
+                        f"Uploading to {format_targets(upload_targets)}...", 92)
 
         if reporter.is_cancelled():
             return PipelineResult(
@@ -374,41 +363,9 @@ def run_web_recipe_pipeline(
                 llm_tokens_estimate=stats.llm_tokens_estimate,
             )
 
-        upload_targets = (
-            ["tandoor", "mealie"] if config.EXPORT_TO_BOTH else [config.OUTPUT_TARGET]
-        )
-        if config.EXPORT_TO_BOTH:
-            reporter.update("upload", "Uploading to Tandoor and Mealie...", 92)
-
-        upload_results = []
-        for target in upload_targets:
-            try:
-                if target == "tandoor":
-                    from tandoor import Tandoor
-
-                    tandoor = Tandoor()
-                    result = tandoor.create_recipe(recipe_data)
-                    if image_path and result.get("id"):
-                        tandoor.upload_image(result["id"], image_path)
-                    upload_results.append((target, True, None))
-                elif target == "mealie":
-                    from mealie import Mealie
-
-                    mealie = Mealie()
-                    result = mealie.create_recipe(recipe_data)
-                    recipe_slug = result.get("slug") or result.get("id")
-                    if image_path and recipe_slug:
-                        mealie.upload_image(recipe_slug, image_path)
-                    upload_results.append((target, True, None))
-            except Exception as upload_error:
-                upload_results.append((target, False, str(upload_error)))
-
-        final_target = (
-            ", ".join(upload_targets) if config.EXPORT_TO_BOTH else config.OUTPUT_TARGET
-        )
-        failed = [r for r in upload_results if not r[1]]
-        if failed and len(failed) == len(upload_targets):
-            msgs = "; ".join(f"{r[0]}: {r[2]}" for r in failed)
+        final_target, failures = upload_recipe_to_targets(recipe_data, image_path)
+        if failures and len(failures) == len(upload_targets):
+            msgs = "; ".join(f"{t}: {msg}" for t, msg in failures)
             return PipelineResult(
                 error=f"All uploads failed: {msgs}",
                 recipe_data=recipe_data,
@@ -416,10 +373,8 @@ def run_web_recipe_pipeline(
                 llm_tokens_estimate=stats.llm_tokens_estimate,
             )
 
-        if failed:
-            success = [r[0] for r in upload_results if r[1]]
-            final_target = ", ".join(success)
-            failed_msgs = "; ".join(f"{r[0]}: {r[2]}" for r in failed)
+        if failures:
+            failed_msgs = "; ".join(f"{t}: {msg}" for t, msg in failures)
             reporter.update(
                 "complete",
                 f"Uploaded to {final_target}. Failed: {failed_msgs}",
@@ -472,15 +427,21 @@ def run_url_pipeline(
     )
 
 
-def _handle_preview_confirmation(
+def _open_preview_approval(
     preview: PreviewWaiter,
     recipe_data: dict,
     image_path: str | None,
     image_candidates: list,
     best_image_index: int,
     reporter: ProgressReporter,
-) -> int | None:
-    """Show preview and wait for user confirmation. Returns selected index or None if cancelled."""
+) -> str:
+    """Park the job for human approval and emit the preview payload.
+
+    Non-blocking by design: the artifact is persisted (JobManager.open_approval)
+    and the preview emitted; the worker thread returns right after. The
+    upload itself happens later in a fresh 'upload'-phase worker once the
+    user approves.
+    """
     reporter.update("preview", "Waiting for your confirmation...", 90)
 
     image_data = None
@@ -499,30 +460,15 @@ def _handle_preview_confirmation(
                     "is_best": idx == best_image_index,
                 })
 
-    display_target = "Tandoor & Mealie" if preview.export_to_both else preview.output_target.capitalize()
-    confirm_event = threading.Event()
-    upload_id = secrets.token_hex(16)
+    display_target = preview.target_label
 
-    preview.pending_uploads[upload_id] = {
-        "recipe": recipe_data,
-        "image_path": image_path,
-        "image_candidates": image_candidates,
-        "output_target": preview.output_target,
-        "event": confirm_event,
-        "confirmed": None,
-        "selected_image_index": best_image_index,
-        "job_id": preview.job_id,
-    }
-
-    preview.create_pending_upload_fn(
-        upload_id=upload_id,
+    upload_id = preview.open_approval_fn(
         job_id=preview.job_id,
         recipe_data=recipe_data,
         image_path=image_path,
         image_candidates=image_candidates,
-        output_target=preview.output_target,
+        output_target=display_target,
         best_image_index=best_image_index,
-        timeout_minutes=5,
     )
 
     preview.emit_preview({
@@ -533,54 +479,5 @@ def _handle_preview_confirmation(
         "candidate_images": candidate_images_data,
         "best_image_index": best_image_index,
         "output_target": display_target,
-        "export_to_both": preview.export_to_both,
     })
-
-    timeout_seconds = 300
-    poll_interval = 1
-    elapsed = 0
-    confirmed = False
-    db_confirmed = False
-    selected_idx = best_image_index
-
-    while elapsed < timeout_seconds:
-        if confirm_event.wait(timeout=poll_interval):
-            confirmed = True
-            break
-
-        db_upload = preview.get_pending_upload_fn(upload_id)
-        if db_upload:
-            if db_upload["status"] == "confirmed":
-                db_confirmed = True
-                confirmed = True
-                selected_idx = db_upload.get("selected_image_index", best_image_index)
-                break
-            if db_upload["status"] in ("cancelled", "expired"):
-                break
-
-        elapsed += poll_interval
-        if preview.is_cancelled():
-            preview.delete_pending_upload_fn(upload_id)
-            preview.pending_uploads.pop(upload_id, None)
-            return None
-
-    db_upload = preview.get_pending_upload_fn(upload_id)
-    preview.delete_pending_upload_fn(upload_id)
-    pending_data = preview.pending_uploads.pop(upload_id, None)
-
-    if not confirmed and elapsed >= timeout_seconds:
-        return None
-
-    was_confirmed = False
-    if db_confirmed:
-        was_confirmed = db_upload and db_upload["status"] == "confirmed"
-    elif pending_data:
-        was_confirmed = pending_data.get("confirmed", False)
-
-    if not was_confirmed:
-        preview.socketio_emit_cancelled()
-        return None
-
-    if not db_confirmed and pending_data:
-        selected_idx = pending_data.get("selected_image_index", best_image_index)
-    return selected_idx
+    return upload_id
