@@ -85,8 +85,8 @@ DEFAULT_CONFIG = {
     "tandoor_api_key": "",
     "tandoor_host": "",
     "target_language": "he",
-    "output_target": "tandoor",
-    "export_to_both": "false",
+    "mealie_enabled": "false",
+    "tandoor_enabled": "true",
     "whisper_model": "small",
     "confirm_before_upload": "true",
     "hf_token": "",
@@ -146,13 +146,41 @@ def _get_config_from_db() -> dict:
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT key, value FROM config')
-            for row in cursor.fetchall():
-                config[row['key']] = row['value']
+            rows = {row['key']: row['value'] for row in cursor.fetchall()}
+            config.update(rows)
+            _migrate_legacy_output_keys(config, rows)
     except sqlite3.OperationalError:
         # Table doesn't exist yet, use defaults
         pass
 
     return config
+
+
+def _truthy(value: str) -> bool:
+    return str(value).lower() in ('true', '1', 'yes', 'on')
+
+
+def _migrate_legacy_output_keys(config: dict, db_rows: dict) -> None:
+    """Derive per-target enabled flags for installs predating them.
+
+    Old model: single `output_target` select plus an `export_to_both`
+    checkbox. New model: independent `mealie_enabled` / `tandoor_enabled`
+    flags. Fills only the flags missing from the database, so choices
+    already saved by the new UI are never overwritten.
+    """
+    if 'mealie_enabled' in db_rows and 'tandoor_enabled' in db_rows:
+        return
+
+    legacy_both = _truthy(config.get('export_to_both', ''))
+    legacy_target = (config.get('output_target') or 'tandoor').strip().lower()
+
+    if 'mealie_enabled' not in db_rows:
+        enable = legacy_both or legacy_target == 'mealie'
+        config['mealie_enabled'] = 'true' if enable else 'false'
+
+    if 'tandoor_enabled' not in db_rows:
+        enable = legacy_both or legacy_target == 'tandoor'
+        config['tandoor_enabled'] = 'true' if enable else 'false'
 
 
 class Config:
@@ -215,13 +243,12 @@ class Config:
         return self._get('target_language', DEFAULT_CONFIG['target_language'])
 
     @property
-    def OUTPUT_TARGET(self) -> str:
-        return self._get('output_target', DEFAULT_CONFIG['output_target'])
+    def MEALIE_ENABLED(self) -> bool:
+        return _truthy(self._get('mealie_enabled', DEFAULT_CONFIG['mealie_enabled']))
 
     @property
-    def EXPORT_TO_BOTH(self) -> bool:
-        value = self._get('export_to_both', DEFAULT_CONFIG['export_to_both'])
-        return value.lower() in ('true', '1', 'yes', 'on')
+    def TANDOOR_ENABLED(self) -> bool:
+        return _truthy(self._get('tandoor_enabled', DEFAULT_CONFIG['tandoor_enabled']))
 
     @property
     def WHISPER_MODEL(self) -> str:
@@ -229,8 +256,7 @@ class Config:
 
     @property
     def CONFIRM_BEFORE_UPLOAD(self) -> bool:
-        value = self._get('confirm_before_upload', DEFAULT_CONFIG['confirm_before_upload'])
-        return value.lower() in ('true', '1', 'yes', 'on')
+        return _truthy(self._get('confirm_before_upload', DEFAULT_CONFIG['confirm_before_upload']))
 
     @property
     def HF_TOKEN(self) -> str:
