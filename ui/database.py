@@ -184,6 +184,21 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )
     ''')
 
+    # Legacy cleanup: retries used to accumulate one failed row per attempt.
+    # Keep the newest failure per URL, then drop failures a success
+    # already superseded.
+    cursor.execute('''
+        DELETE FROM recipe_history WHERE status = 'failed' AND id NOT IN (
+            SELECT MAX(id) FROM recipe_history WHERE status = 'failed'
+            GROUP BY url
+        )
+    ''')
+    cursor.execute('''
+        DELETE FROM recipe_history WHERE status = 'failed' AND url IN (
+            SELECT url FROM recipe_history WHERE status = 'success'
+        )
+    ''')
+
     conn.commit()
 
 
@@ -502,7 +517,17 @@ def create_history_entry(job_id: str, url: str, video_title: Optional[str],
                          thumbnail_path: Optional[str], thumbnail_data: Optional[str],
                          status: str, error_message: Optional[str] = None,
                          output_target: Optional[str] = None) -> Optional[int]:
-    """Create a history entry for a completed/failed recipe extraction."""
+    """Create a history entry for a completed/failed recipe extraction.
+
+    Maintains a per-URL cleanliness invariant at write time:
+    - a success entry removes all older failed entries for the same URL
+      (a retry that landed supersedes the attempts that didn't);
+    - a failed entry replaces any previous failure for the same URL
+      (only the latest error is worth keeping).
+
+    Read paths can therefore trust there is at most one relevant row per
+    outcome per URL — no EXISTS-based hiding needed.
+    """
     with get_db() as conn:
         cursor = conn.cursor()
         recipe_json = json.dumps(recipe_data) if recipe_data else None
@@ -513,8 +538,16 @@ def create_history_entry(job_id: str, url: str, video_title: Optional[str],
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (job_id, url, video_title, recipe_name, recipe_json, thumbnail_path,
               thumbnail_data, status, error_message, output_target))
+        new_id = cursor.lastrowid
+
+        if status in ('success', 'failed'):
+            cursor.execute(
+                "DELETE FROM recipe_history "
+                "WHERE url = ? AND status = 'failed' AND id != ?",
+                (url, new_id),
+            )
         conn.commit()
-        return cursor.lastrowid
+        return new_id
 
 
 def get_history(limit: int = 50, offset: int = 0,
@@ -626,7 +659,6 @@ def get_combined_history_and_jobs(limit: int = 50, offset: int = 0,
         cursor = conn.cursor()
         
         # Build query for recipe_history
-        # Exclude failed entries if there's a successful entry for the same URL
         history_query = '''
             SELECT
                 'history' as source_type,
@@ -647,16 +679,9 @@ def get_combined_history_and_jobs(limit: int = 50, offset: int = 0,
                 NULL as stage_message,
                 rh.created_at as updated_at
             FROM recipe_history rh
-            WHERE NOT (
-                rh.status = 'failed'
-                AND EXISTS (
-                    SELECT 1 FROM recipe_history rh2
-                    WHERE rh2.url = rh.url AND rh2.status = 'success'
-                )
-            )
         '''
         history_params = []
-        
+
         # Build query for recipe_jobs (only active jobs that don't have history entries)
         # Exclude completed/failed jobs as they should have history entries
         jobs_query = '''
@@ -758,16 +783,7 @@ def get_combined_history_and_jobs_count(status_filter: Optional[str] = None,
         
         # Count from recipe_history
         # Exclude failed entries if there's a successful entry for the same URL
-        history_query = '''
-            SELECT COUNT(*) FROM recipe_history rh
-            WHERE NOT (
-                rh.status = 'failed'
-                AND EXISTS (
-                    SELECT 1 FROM recipe_history rh2
-                    WHERE rh2.url = rh.url AND rh2.status = 'success'
-                )
-            )
-        '''
+        history_query = "SELECT COUNT(*) FROM recipe_history rh WHERE 1=1"
         history_params = []
         
         # Count from recipe_jobs (only active jobs that don't have history entries)

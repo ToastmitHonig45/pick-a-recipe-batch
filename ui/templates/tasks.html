@@ -6,13 +6,13 @@
 <div class="main-container">
     <div class="header">
         <h1><i class="fas fa-list-check"></i> Tasks</h1>
-        <p>One table for everything — live jobs up top, finished ones marked Done</p>
+        <p>Live jobs up top — everything that finished settles below as Done</p>
     </div>
 
     <div class="tasks-toolbar">
         <div class="search-box">
             <i class="fas fa-search"></i>
-            <input type="text" id="task-search" placeholder="Search tasks..." class="search-input">
+            <input type="text" id="task-search" placeholder="Search tasks…" class="search-input">
         </div>
         <select id="task-filter" class="filter-select">
             <option value="">All</option>
@@ -53,31 +53,28 @@
         <div class="task-thumb"></div>
         <div class="task-main">
             <div class="task-head">
-                <span class="task-status-chip"></span>
+                <span class="status-pill"><span class="pill-dot"></span><span class="pill-text"></span></span>
                 <h3 class="task-title">…</h3>
-                <span class="task-position chip"></span>
-                <span class="task-expiry" data-expires=""></span>
+                <span class="queue-pos chip"></span>
+                <span class="expiry mono" data-expires=""></span>
             </div>
-            <p class="task-message"></p>
-            <div class="progress-bar-container task-progress-wrap">
-                <div class="progress-bar" style="width:0%"></div>
-                <span class="progress-text">0%</span>
-            </div>
+            <p class="gallery-summary"></p>
             <div class="approval-gallery"></div>
-            <p class="task-url"></p>
+            <p class="task-message"></p>
+            <div class="task-progress-wrap">
+                <div class="progress-track">
+                    <div class="progress-bar"></div>
+                </div>
+                <span class="progress-text mono">0%</span>
+            </div>
+            <p class="task-meta mono"></p>
         </div>
-        <div class="task-actions">
-            <button class="btn btn-primary btn-sm approve-btn"><i class="fas fa-check"></i> Approve</button>
-            <button class="btn btn-danger btn-sm reject-btn"><i class="fas fa-times"></i> Reject</button>
-            <button class="btn btn-secondary btn-sm cancel-btn"><i class="fas fa-ban"></i> Cancel</button>
-            <span class="priority-controls">
-                <button class="btn btn-icon prio-down" title="Move later"><i class="fas fa-arrow-down"></i></button>
-                <button class="btn btn-icon prio-up" title="Move earlier"><i class="fas fa-arrow-up"></i></button>
-            </span>
-            <button class="btn btn-icon view-btn" title="View recipe"><i class="fas fa-eye"></i></button>
-            <button class="btn btn-icon reupload-btn" title="Re-upload"><i class="fas fa-cloud-upload-alt"></i></button>
-            <button class="btn btn-icon retry-btn" title="Retry"><i class="fas fa-redo"></i></button>
-            <button class="btn btn-icon del-btn" title="Delete"><i class="fas fa-trash"></i></button>
+        <div class="task-side">
+            <button class="btn btn-sm primary-action"></button>
+            <div class="task-menu">
+                <button class="kebab-btn" title="More actions"><i class="fas fa-ellipsis-v"></i></button>
+                <div class="task-menu-items"></div>
+            </div>
         </div>
     </div>
 </template>

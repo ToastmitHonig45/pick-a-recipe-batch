@@ -1,44 +1,54 @@
-/* Unified dashboard: live tasks + finished recipes ("Done") merged into one table.
+/* Unified dashboard: live tasks + finished recipes merged into one table.
  *
- * Data sources:
- *   /api/tasks?state=all  -> every job (queued/running/approval/terminal) with live data
- *   /api/recipes          -> recipe_history entries (rendered as "Done" tasks)
+ * Rows come from two sources and are reconciled by job_id:
+ *   /api/tasks?state=all  -> every job (queued/running/approval/terminal)
+ *   /api/recipes          -> recipe_history records (shown as Done/Failed rows)
  *
- * History rows win over their twin terminal job rows (matched by job_id) so the
- * richer record (thumbnail, recipe name, output target) is what gets shown.
+ * A history record always supersedes its twin terminal job row. While a retry
+ * is in flight, the job's retry_from_history_id marks the old record as
+ * superseded: neither the stale failure nor its twin job row is shown.
  */
 (function () {
     'use strict';
 
     const state = {
-        rows: [],            // merged, sorted row models
-        selected: new Set(), // selection keys: job ids or 'h<id>' for history rows
+        rows: [],
+        selected: new Set(),
         search: '',
-        filter: '',          // '' | approval | running | queued | done | failed | cancelled
+        filter: '',
+        loaded: false,
         reloadTimer: null,
     };
     const $ = (sel, root) => (root || document).querySelector(sel);
     const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 
     const STATUS_META = {
-        queued: { label: 'Queued', cls: 'chip-queued' },
-        pending: { label: 'Queued', cls: 'chip-queued' },
-        running: { label: 'Processing', cls: 'chip-running' },
-        downloading: { label: 'Processing', cls: 'chip-running' },
-        transcribing: { label: 'Processing', cls: 'chip-running' },
-        extracting: { label: 'Extracting', cls: 'chip-running' },
-        creating: { label: 'Creating recipe', cls: 'chip-running' },
-        processing: { label: 'Processing', cls: 'chip-running' },
-        uploading: { label: 'Uploading', cls: 'chip-uploading' },
-        awaiting_approval: { label: 'Needs approval', cls: 'chip-approval' },
-        success: { label: 'Done', cls: 'chip-done' },
-        completed: { label: 'Done', cls: 'chip-done' },
-        failed: { label: 'Failed', cls: 'chip-failed' },
-        cancelled: { label: 'Cancelled', cls: 'chip-muted' },
-        expired: { label: 'Expired', cls: 'chip-muted' },
+        queued: { label: 'Queued', cls: 'is-queued' },
+        pending: { label: 'Queued', cls: 'is-queued' },
+        running: { label: 'Processing', cls: 'is-running' },
+        downloading: { label: 'Downloading', cls: 'is-running' },
+        transcribing: { label: 'Transcribing', cls: 'is-running' },
+        extracting: { label: 'Extracting', cls: 'is-running' },
+        creating: { label: 'Creating recipe', cls: 'is-running' },
+        processing: { label: 'Processing', cls: 'is-running' },
+        uploading: { label: 'Uploading', cls: 'is-running' },
+        awaiting_approval: { label: 'Needs approval', cls: 'is-approval' },
+        success: { label: 'Done', cls: 'is-done' },
+        completed: { label: 'Done', cls: 'is-done' },
+        failed: { label: 'Failed', cls: 'is-failed' },
+        cancelled: { label: 'Cancelled', cls: 'is-muted' },
+        expired: { label: 'Expired', cls: 'is-muted' },
     };
 
     const TERMINAL = ['success', 'completed', 'failed', 'cancelled', 'expired'];
+    const GROUP_OF = {
+        approval: 'Needs you',
+        running: 'In flight',
+        queued: 'In flight',
+        done: 'Settled',
+        failed: 'Settled',
+        cancelled: 'Settled',
+    };
 
     function api(path, opts) {
         return fetch(path, Object.assign({
@@ -69,7 +79,7 @@
         setTimeout(() => el.remove(), 3500);
     }
 
-    /* ===== Row normalization & merge ===== */
+    /* ===== Row model ===== */
 
     function bucketOf(status) {
         if (status === 'awaiting_approval') return 'approval';
@@ -81,7 +91,7 @@
     }
 
     function tsOf(row) {
-        const t = Date.parse((row.updatedAt || row.createdAt || '').replace(' ', 'T'));
+        const t = Date.parse(String(row.updatedAt || row.createdAt || '').replace(' ', 'T'));
         return isNaN(t) ? 0 : t;
     }
 
@@ -93,7 +103,7 @@
             historyId: null,
             status: t.status,
             bucket: bucketOf(t.status),
-            title: t.video_title || t.url || 'Untitled',
+            title: t.video_title || hostOf(t.url) || 'Untitled',
             url: t.url || '',
             message: t.stage_message || '',
             error: t.error_message || '',
@@ -117,7 +127,7 @@
             historyId: r.id,
             status: r.status,
             bucket: bucketOf(r.status),
-            title: r.recipe_name || r.video_title || r.url || 'Untitled Recipe',
+            title: r.recipe_name || r.video_title || hostOf(r.url) || 'Untitled Recipe',
             url: r.url || '',
             message: '',
             error: r.error_message || '',
@@ -127,10 +137,19 @@
             pendingUploadId: null,
             approvalExpiresAt: '',
             queuePosition: null,
+            queuePriority: 0,
             createdAt: r.created_at || '',
             updatedAt: r.updated_at || r.created_at || '',
         };
     }
+
+    function hostOf(url) {
+        if (!url) return '';
+        try { return new URL(url).hostname.replace(/^www\./, ''); }
+        catch { return ''; }
+    }
+
+    /* ===== Merge ===== */
 
     const BUCKET_ORDER = { approval: 0, running: 1, queued: 2, done: 3, failed: 3, cancelled: 3 };
 
@@ -138,17 +157,26 @@
         updateCounts(counts);
 
         const byJobId = new Map(tasks.map((t) => [String(t.id), t]));
-        const rows = [];
 
+        // Retries in flight supersede the failure record they were launched from.
+        const superseded = new Set(tasks
+            .filter((t) => !TERMINAL.includes(t.status) && t.retry_from_history_id)
+            .map((t) => String(t.retry_from_history_id)));
+
+        const rows = [];
         (recipes || []).forEach((r) => {
-            if (r.source_type !== 'history') return; // live jobs come from /api/tasks
-            // A finished recipe supersedes its terminal twin job row.
-            if (r.job_id && byJobId.has(String(r.job_id))) byJobId.delete(String(r.job_id));
+            if (r.source_type !== 'history') return;
+            const twinKey = r.job_id ? String(r.job_id) : null;
+            const twin = twinKey ? byJobId.get(twinKey) : null;
+            if (superseded.has(String(r.id))) {
+                if (twin) byJobId.delete(twinKey);
+                return;
+            }
+            if (twin) byJobId.delete(twinKey);
             rows.push(normalizeHistory(r));
         });
         byJobId.forEach((t) => rows.push(normalizeTask(t)));
 
-        // One table: actionable items on top, finished ones newest-first below.
         rows.sort((a, b) => {
             const wa = BUCKET_ORDER[a.bucket] != null ? BUCKET_ORDER[a.bucket] : 9;
             const wb = BUCKET_ORDER[b.bucket] != null ? BUCKET_ORDER[b.bucket] : 9;
@@ -157,13 +185,12 @@
         });
 
         state.rows = rows;
+        state.loaded = true;
         render();
     }
 
     function updateCounts(counts) {
         if (!counts) return;
-
-        // Sidebar badge stays live at all times.
         const link = $('#approvals-badge');
         const n = counts.awaiting_approval || 0;
         if (link) {
@@ -181,7 +208,7 @@
         }
     }
 
-    /* ===== Filtering & rendering ===== */
+    /* ===== Rendering ===== */
 
     function visibleRows() {
         const q = state.search.trim().toLowerCase();
@@ -197,20 +224,95 @@
         return state.rows.find((r) => r.key === key) || null;
     }
 
+    function groupLabelNode(label, count) {
+        const el = document.createElement('div');
+        el.className = 'task-group-label';
+        const name = document.createElement('span');
+        name.textContent = label;
+        const num = document.createElement('i');
+        num.textContent = count;
+        el.append(name, num);
+        return el;
+    }
+
+    function render() {
+        const list = $('#tasks-list');
+        list.textContent = '';
+
+        if (!state.loaded) {
+            for (let i = 0; i < 4; i++) {
+                const sk = document.createElement('div');
+                sk.className = 'task-card skeleton';
+                list.appendChild(sk);
+            }
+            $('#tasks-empty').style.display = 'none';
+            return;
+        }
+
+        const rows = visibleRows();
+        $('#tasks-empty').style.display = rows.length ? 'none' : '';
+        $('#empty-text').textContent = state.rows.length
+            ? 'Nothing matches the current search or filter.'
+            : 'Nothing here right now.';
+
+        const countsByGroup = {};
+        rows.forEach((r) => {
+            const g = GROUP_OF[r.bucket];
+            countsByGroup[g] = (countsByGroup[g] || 0) + 1;
+        });
+
+        let lastGroup = null;
+        let delay = 0;
+        rows.forEach((row) => {
+            const group = GROUP_OF[row.bucket];
+            if (group !== lastGroup) {
+                lastGroup = group;
+                list.appendChild(groupLabelNode(group, countsByGroup[group]));
+                delay = 0;
+            }
+            const card = cardFor(row);
+            card.style.animationDelay = Math.min(delay * 40, 240) + 'ms';
+            delay++;
+            list.appendChild(card);
+        });
+
+        syncBulkBar();
+    }
+
+    function menuButton(label, icon, handler, danger) {
+        const btn = document.createElement('button');
+        btn.className = 'menu-item' + (danger ? ' is-danger' : '');
+        btn.innerHTML = '<i class="fas ' + icon + '"></i>' + escapeHtml(label);
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            closeMenus();
+            handler();
+        });
+        return btn;
+    }
+
     function cardFor(row) {
         const tpl = $('#task-card-template');
         const node = tpl.content.firstElementChild.cloneNode(true);
         node.dataset.rowKey = row.key;
 
-        const meta = STATUS_META[row.status] || { label: row.status, cls: 'chip-muted' };
-        $('.task-status-chip', node).textContent = meta.label;
-        $('.task-status-chip', node).classList.add(meta.cls);
+        const meta = STATUS_META[row.status] || { label: row.status, cls: 'is-muted' };
+        const chip = $('.status-pill', node);
+        chip.classList.add(meta.cls);
+        $('.pill-dot', node).classList.add(meta.cls);
+        $('.pill-text', node).textContent = meta.label;
 
         $('.task-title', node).textContent = row.title;
-        $('.task-message', node).textContent =
-            row.message || (row.bucket === 'done' && row.outputTarget
-                ? 'Uploaded to ' + row.outputTarget : '');
-        $('.task-url', node).textContent = truncateUrl(row.url);
+
+        const bits = [relativeTime(row.updatedAt || row.createdAt)];
+        if (row.bucket === 'done' && row.outputTarget) bits.push('→ ' + row.outputTarget);
+        const host = hostOf(row.url);
+        if (host && row.bucket === 'done') bits.push(host);
+        if (row.kind === 'history' && row.status === 'failed' && row.error) {
+            bits.push(row.error.length > 80 ? row.error.slice(0, 80) + '…' : row.error);
+        }
+        $('.task-meta', node).innerHTML = bits.filter(Boolean).map(escapeHtml)
+            .join('<span class="meta-sep">·</span>');
 
         const thumbWrap = $('.task-thumb', node);
         if (row.thumbnailData) {
@@ -230,90 +332,100 @@
         $('.progress-bar', node).style.width = row.progress + '%';
         $('.progress-text', node).textContent = row.progress + '%';
 
-        $('.approve-btn', node).style.display = isApproval ? '' : 'none';
-        $('.reject-btn', node).style.display = isApproval ? '' : 'none';
-        $('.cancel-btn', node).style.display = (!isTerminal && !isApproval) ? '' : 'none';
-        $('.priority-controls', node).style.display = isQueued ? '' : 'none';
-        $('.task-progress-wrap', node).style.display = isActive ? '' : 'none';
+        const primary = $('.primary-action', node);
+        const menu = $('.task-menu-items', node);
 
-        $('.view-btn', node).style.display = row.kind === 'history' ? '' : 'none';
-        $('.reupload-btn', node).style.display =
-            (row.kind === 'history' && row.status === 'success') ? '' : 'none';
-        $('.retry-btn', node).style.display = row.status === 'failed' ? '' : 'none';
-        $('.del-btn', node).style.display = isTerminal ? '' : 'none';
-
-        const checkbox = $('.task-select', node);
-        checkbox.checked = state.selected.has(row.key);
+        if (isApproval) {
+            primary.innerHTML = '<i class="fas fa-check"></i> Approve';
+            primary.classList.add('btn-approve');
+            primary.addEventListener('click', () =>
+                decide(row.pendingUploadId, 'confirm', node.dataset.imageIndex));
+            menu.appendChild(menuButton('Reject', 'fa-times',
+                () => decide(row.pendingUploadId, 'cancel'), true));
+        } else if (row.status === 'failed') {
+            primary.innerHTML = '<i class="fas fa-redo"></i> Retry';
+            primary.classList.add('btn-retry');
+            primary.addEventListener('click', () => retryAnalysis(row.url, row.historyId));
+        } else if (row.kind === 'history' && row.status === 'success') {
+            primary.innerHTML = '<i class="fas fa-eye"></i> View';
+            primary.classList.add('btn-view');
+            primary.addEventListener('click', () => showRecipeDetails(row.historyId));
+        } else {
+            primary.style.display = 'none';
+        }
 
         if (isApproval && row.pendingUploadId) {
             node.dataset.uploadId = row.pendingUploadId;
-            $('.task-expiry', node).dataset.expires = row.approvalExpiresAt || '';
+            $('.expiry', node).dataset.expires = row.approvalExpiresAt || '';
             attachGallery(node, row.pendingUploadId);
-            $('.approve-btn', node).addEventListener('click', () =>
-                decide(row.pendingUploadId, 'confirm', node.dataset.imageIndex));
-            $('.reject-btn', node).addEventListener('click', () =>
-                decide(row.pendingUploadId, 'cancel'));
-        } else {
-            $('.task-expiry', node).style.display = 'none';
+            node.classList.add('card-approval');
         }
 
         if (isQueued) {
-            $('.task-position', node).textContent = '#' + (row.queuePosition || '?');
-            $('.prio-up', node).addEventListener('click', () =>
-                shiftPriority(row.jobId, +1));
-            $('.prio-down', node).addEventListener('click', () =>
-                shiftPriority(row.jobId, -1));
-        } else {
-            $('.task-position', node).style.display = 'none';
+            const pos = $('.queue-pos', node);
+            pos.textContent = '#' + (row.queuePosition || '?');
+            pos.style.display = '';
+            menu.appendChild(menuButton('Move earlier', 'fa-arrow-up',
+                () => shiftPriority(row.jobId, +1)));
+            menu.appendChild(menuButton('Move later', 'fa-arrow-down',
+                () => shiftPriority(row.jobId, -1)));
         }
 
-        $('.cancel-btn', node).addEventListener('click', async () => {
-            try {
-                await api('/api/jobs/' + row.jobId, { method: 'DELETE' });
-                debounceReload(150);
-            } catch (err) { toast(err.message, true); }
-        });
+        if (!isTerminal && !isApproval) {
+            menu.appendChild(menuButton('Cancel job', 'fa-ban', async () => {
+                try {
+                    await api('/api/jobs/' + row.jobId, { method: 'DELETE' });
+                    debounceReload(150);
+                } catch (err) { toast(err.message, true); }
+            }, true));
+        }
 
-        $('.view-btn', node).addEventListener('click', (e) => {
+        if (row.kind === 'history' && row.status === 'success') {
+            menu.appendChild(menuButton('Re-upload to Tandoor', 'fa-utensils',
+                () => reuploadRecipe(row.historyId, 'tandoor')));
+            menu.appendChild(menuButton('Re-upload to Mealie', 'fa-book',
+                () => reuploadRecipe(row.historyId, 'mealie')));
+        }
+
+        if (isTerminal) {
+            menu.appendChild(menuButton('Delete', 'fa-trash',
+                () => openConfirmDelete(row), true));
+        }
+
+        const kebab = $('.kebab-btn', node);
+        kebab.addEventListener('click', (e) => {
             e.stopPropagation();
-            showRecipeDetails(row.historyId);
+            const wasOpen = $('.task-menu', node).classList.contains('open');
+            closeMenus();
+            if (!wasOpen) $('.task-menu', node).classList.add('open');
         });
+        if (!menu.children.length && primary.style.display === 'none') {
+            $('.task-side', node).style.display = 'none';
+        }
 
-        $('.reupload-btn', node).addEventListener('click', (e) => {
-            e.stopPropagation();
-            showRecipeDetails(row.historyId);
-        });
-
-        $('.retry-btn', node).addEventListener('click', (e) => {
-            e.stopPropagation();
-            retryAnalysis(row.url, row.historyId);
-        });
-
-        $('.del-btn', node).addEventListener('click', (e) => {
-            e.stopPropagation();
-            openConfirmDelete(row);
-        });
-
+        const checkbox = $('.task-select', node);
+        checkbox.checked = state.selected.has(row.key);
         checkbox.addEventListener('change', function () {
             if (this.checked) state.selected.add(row.key);
             else state.selected.delete(row.key);
             syncBulkBar();
         });
 
+        if (row.kind === 'history' && row.status === 'success') {
+            node.addEventListener('click', (e) => {
+                if (e.target.closest('.task-select, .task-side')) return;
+                showRecipeDetails(row.historyId);
+            });
+        }
+
         return node;
     }
 
-    function render() {
-        const list = $('#tasks-list');
-        list.textContent = '';
-        const rows = visibleRows();
-        $('#tasks-empty').style.display = rows.length ? 'none' : '';
-        $('#empty-text').textContent = state.rows.length
-            ? 'No matches for the current search or filter.'
-            : 'Nothing here right now.';
-        rows.forEach((row) => list.appendChild(cardFor(row)));
-        syncBulkBar();
+    function closeMenus() {
+        $$('.task-menu.open').forEach((m) => m.classList.remove('open'));
     }
+
+    document.addEventListener('click', closeMenus);
 
     /* ===== Actions ===== */
 
@@ -338,26 +450,22 @@
                 bits.push((recipe.instructions || recipe.steps).length + ' steps');
             }
             if (bits.length) {
-                $('.task-message', node).textContent = bits.join(' · ');
+                $('.gallery-summary', node).textContent = bits.join(' · ');
             }
 
             const gallery = $('.approval-gallery', node);
-            const candidates = (detail.candidate_images || [])
-                .filter((c) => c.data);
+            const candidates = (detail.candidate_images || []).filter((c) => c.data);
             if (!candidates.length && detail.image_data) {
-                candidates.push({ index: 0, data: detail.image_data,
-                                  is_best: true });
+                candidates.push({ index: 0, data: detail.image_data, is_best: true });
             }
             let chosen = null;
             candidates.forEach((cand) => {
                 const img = document.createElement('img');
                 img.src = 'data:image/jpeg;base64,' + cand.data;
-                img.className = 'gallery-thumb' +
-                    (cand.is_best ? ' best-candidate' : '');
+                img.className = 'gallery-thumb' + (cand.is_best ? ' best-candidate' : '');
                 img.title = cand.is_best ? 'AI recommendation' : 'Candidate';
                 img.addEventListener('click', () => {
-                    $$('.gallery-thumb', node).forEach(
-                        (t) => t.classList.remove('selected'));
+                    $$('.gallery-thumb', node).forEach((t) => t.classList.remove('selected'));
                     img.classList.add('selected');
                     chosen = cand.index;
                     node.dataset.imageIndex = String(cand.index);
@@ -378,8 +486,7 @@
             method: 'POST',
             body: JSON.stringify(body),
         }).then(() => {
-            toast(action === 'confirm' ? 'Approved — uploading…'
-                                       : 'Rejected');
+            toast(action === 'confirm' ? 'Approved — uploading…' : 'Rejected');
             debounceReload(250);
         }).catch((err) => toast(err.message, true));
     }
@@ -408,7 +515,7 @@
         }
 
         $('#modal-source-url').href = item.url || '#';
-        $('#modal-source-url').textContent = truncateUrl(item.url);
+        $('#modal-source-url').textContent = item.url || '';
         $('#modal-created-at').textContent = formatDate(item.created_at);
         $('#modal-target').textContent = item.output_target || 'N/A';
 
@@ -506,7 +613,8 @@
         const count = state.selected.size;
         $('#bulk-summary').textContent = count + ' selected';
         $('#bulk-bar').style.display = count ? '' : 'none';
-        $('#select-all-label').style.display = state.rows.length ? '' : 'none';
+        $('#select-all-label').style.display =
+            state.loaded && state.rows.length ? '' : 'none';
 
         let hasApproval = false;
         let hasCancellable = false;
@@ -530,8 +638,7 @@
             method: 'POST',
             body: JSON.stringify({ action: action, ids: ids }),
         }).then((res) => {
-            toast(res.succeeded + ' ' + action + 'd, ' +
-                  res.failed + ' skipped');
+            toast(res.succeeded + ' ' + action + 'd, ' + res.failed + ' skipped');
             state.selected.clear();
             $('#select-all').checked = false;
             debounceReload(250);
@@ -546,10 +653,13 @@
             api('/api/recipes?limit=300'),
         ]).then(([tasksRes, recipesRes]) => {
             mergeRows(tasksRes.tasks || [], tasksRes.counts, recipesRes.items || []);
-        }).catch((err) => toast(err.message, true));
+        }).catch((err) => {
+            state.loaded = true;
+            render();
+            toast(err.message, true);
+        });
     }
 
-    /* ===== Expiry countdowns tick independently of reloads. ===== */
     setInterval(() => {
         $$('[data-expires]').forEach((el) => {
             const iso = el.dataset.expires;
@@ -568,13 +678,11 @@
         });
     }, 1000);
 
-    /* Live refresh: any relevant socket activity triggers one throttled reload. */
     const socket = io();
     ['job_progress', 'job_complete', 'job_failed', 'job_cancelled',
      'approval_confirmed', 'approval_rejected', 'approvals_updated']
         .forEach((evt) => socket.on(evt, () => debounceReload()));
 
-    /* Slow poll keeps Done rows fresh even without socket coverage. */
     setInterval(load, 15000);
 
     /* ===== Static wiring ===== */
@@ -617,14 +725,12 @@
         $('#confirm-delete-modal').style.display = 'flex';
     }
 
-    /* Modal wiring */
     $('#close-recipe-modal').addEventListener('click', hideRecipeModal);
 
     $('#delete-recipe-btn').addEventListener('click', function () {
         const row = findRow('h' + this.dataset.historyId);
         if (row) openConfirmDelete(row);
     });
-
 
     $('#reupload-recipe-btn').addEventListener('click', (e) => {
         e.stopPropagation();
@@ -676,7 +782,7 @@
             });
         });
 
-    /* ===== Utility functions ===== */
+    /* ===== Utilities ===== */
     function escapeHtml(text) {
         if (!text) return '';
         const div = document.createElement('div');
@@ -684,29 +790,22 @@
         return div.innerHTML;
     }
 
-    function truncateUrl(url) {
-        if (!url) return '';
-        try {
-            const parsed = new URL(url);
-            return parsed.hostname + parsed.pathname.slice(0, 30)
-                + (parsed.pathname.length > 30 ? '…' : '');
-        } catch {
-            return url.slice(0, 50) + (url.length > 50 ? '…' : '');
-        }
+    function relativeTime(dateStr) {
+        if (!dateStr) return '';
+        const date = new Date(String(dateStr).replace(' ', 'T'));
+        const diff = Date.now() - date;
+        if (isNaN(diff)) return '';
+        if (diff < 60000) return 'just now';
+        if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+        if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+        if (diff < 604800000) return Math.floor(diff / 86400000) + 'd ago';
+        return date.toLocaleDateString();
     }
 
     function formatDate(dateStr) {
         if (!dateStr) return '';
         const date = new Date(String(dateStr).replace(' ', 'T'));
-        const now = new Date();
-        const diff = now - date;
-
-        if (diff < 60000) return 'Just now';
-        if (diff < 3600000) return Math.floor(diff / 60000) + ' minutes ago';
-        if (diff < 86400000) return Math.floor(diff / 3600000) + ' hours ago';
-        if (diff < 604800000) return Math.floor(diff / 86400000) + ' days ago';
-
-        return date.toLocaleDateString();
+        return date.toLocaleString();
     }
 
     function debounce(func, wait) {
