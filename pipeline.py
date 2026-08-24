@@ -132,7 +132,9 @@ def run_extraction_pipeline(
 
         reporter.update("visual", "Extracting on-screen text...", 55)
         visual_text = ""
-        visual_cache = os.path.join(dish_dir, f"visual_{lang}.txt")
+        # v2 invalidates earlier text-only visual analysis caches. The current
+        # prompt analyzes the complete video (visuals, overlays, actions, audio).
+        visual_cache = os.path.join(dish_dir, f"visual_v2_{lang}.txt")
         if os.path.exists(visual_cache):
             reporter.update("visual", "Using cached visual text", 60)
             with open(visual_cache, "r", encoding="utf-8") as f:
