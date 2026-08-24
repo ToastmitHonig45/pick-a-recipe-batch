@@ -186,8 +186,16 @@ class Transcriber:
         # Use target language from config if not specified
         lang = language or config.TARGET_LANGUAGE
 
+        # Prefer accuracy over raw speed for recipe instructions. A wider beam
+        # helps the tiny cloud-safe model retain ingredient names, quantities,
+        # temperatures and short imperative phrases.
         segments, info = self.model.transcribe(
-            audio_path, language=lang)
+            audio_path,
+            language=lang,
+            beam_size=5,
+            vad_filter=True,
+            condition_on_previous_text=True,
+        )
         
         text_parts = []
         for seg in segments:
@@ -232,7 +240,7 @@ class Transcriber:
 
         prompt = self._get_visual_text_prompt()
 
-        def _call(model: str):
+        def _call(model: str, prompt_text: str):
             return client.models.generate_content(
                 model=model,
                 contents=[
@@ -243,14 +251,44 @@ class Transcriber:
                                 file_uri=video_file.uri or "",
                                 mime_type=video_file.mime_type or "video/mp4"
                             ),
-                            types.Part.from_text(text=prompt),
+                            types.Part.from_text(text=prompt_text),
                         ],
                     ),
                 ],
             )
 
-        response, _ = call_with_model_fallback("gemini", config.GEMINI_MODEL, _call)
-        return response.text or ""
+        response, used_model = call_with_model_fallback(
+            "gemini",
+            config.GEMINI_MODEL,
+            lambda model: _call(model, prompt),
+        )
+        first_pass = response.text or ""
+
+        # A separate second viewing catches brief overlays, small additions and
+        # visually implied actions that a single chronological pass can miss.
+        review_prompt = f"""Independently watch the ENTIRE video again and audit the
+draft observation report below. Produce a corrected, more complete final report.
+
+Check specifically for:
+- every ingredient container and every ingredient actually added
+- oil, butter, water, stock, sauces, seasoning and garnishes
+- quantities, package sizes, temperatures, times and heat levels
+- preparation actions, cookware, ordering and doneness cues
+- contradictions between narration, captions and visible actions
+
+Keep supported details even when no exact quantity is available; write
+\"quantity not shown\" instead of omitting the ingredient. Never invent unsupported
+ingredients or exact measurements. Return only the revised detailed report in
+{config.RECIPE_LANG}.
+
+FIRST-PASS DRAFT:
+{first_pass}"""
+        reviewed, _ = call_with_model_fallback(
+            "gemini",
+            used_model,
+            lambda model: _call(model, review_prompt),
+        )
+        return reviewed.text or first_pass
 
     def _extract_visual_text_openai(self) -> str:
         """Extract visual text using OpenAI's vision API with extracted frames."""
