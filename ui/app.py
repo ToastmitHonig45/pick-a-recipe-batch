@@ -30,6 +30,9 @@ from database import (
     cleanup_expired_pending_uploads, cleanup_old_jobs,
     save_push_subscription, get_push_subscriptions, delete_push_subscription,
 )
+from batch_imports import (
+    init_batch_import_manager, get_batch_import_manager,
+)
 from job_manager import (
     init_job_manager, get_job_manager, resolve_max_concurrent,
     prune_artifact_dirs,
@@ -91,6 +94,11 @@ def _get_or_create_secret_key():
 @app.route('/healthz')
 def healthz():
     return jsonify({'status': 'ok'}), 200
+
+
+@app.route('/health')
+def health():
+    return healthz()
 
 
 @app.route('/api/health')
@@ -330,6 +338,18 @@ def tasks_page():
     return render_template('tasks.html')
 
 
+@app.route('/batch-import')
+@login_required
+def batch_import_page():
+    """Batch import page for TXT uploads."""
+    manager = get_batch_import_manager()
+    batch = None
+    if manager is not None:
+        user_id, is_admin = _scope()
+        batch = manager.get_active_batch(user_id=user_id, is_admin=is_admin)
+    return render_template('batch_import.html', batch=batch)
+
+
 @app.route('/share', methods=['GET', 'POST'])
 def share():
     """Handle shared URLs from PWA share_target.
@@ -563,6 +583,118 @@ def create_jobs_batch():
     for url in urls[:50]:
         jobs.append(_start_job_for_url(url.strip()))
     return jsonify({'jobs': jobs, 'count': len(jobs)})
+
+
+@app.route('/api/batches', methods=['POST'])
+@api_login_required
+def create_batch_import():
+    """Create a persistent TXT batch import and start it immediately."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'TXT file is required'}), 400
+
+    uploaded = request.files['file']
+    if not uploaded.filename:
+        return jsonify({'error': 'TXT file is required'}), 400
+    if not uploaded.filename.lower().endswith('.txt'):
+        return jsonify({'error': 'Only TXT files are supported'}), 400
+
+    raw = uploaded.read()
+    try:
+        text = raw.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        text = raw.decode('utf-8', errors='replace')
+
+    manager = get_batch_import_manager()
+    if manager is None:
+        return jsonify({'error': 'Batch importer is not initialized'}), 503
+
+    user_id = session.get('user')
+    result = manager.create_batch_from_text(
+        original_filename=uploaded.filename,
+        text=text,
+        user_id=user_id,
+    )
+    if not result.get('ok'):
+        return jsonify({'error': result.get('error', 'Batch creation failed')}), 400
+
+    manager.start_batch(result['batch_id'], user_id=user_id, is_admin=_current_user_is_admin())
+    batch = manager.get_batch(result['batch_id'], user_id=user_id, is_admin=_current_user_is_admin())
+    return jsonify({
+        'status': 'created',
+        'batch': batch,
+        'duplicates_removed': result.get('duplicates_removed', 0),
+        'skipped_existing': result.get('skipped_existing', 0),
+    })
+
+
+@app.route('/api/batches/active', methods=['GET'])
+@api_login_required
+def get_active_batch():
+    manager = get_batch_import_manager()
+    if manager is None:
+        return jsonify({'error': 'Batch importer is not initialized'}), 503
+    user_id, is_admin = _scope()
+    batch = manager.get_active_batch(user_id=user_id, is_admin=is_admin)
+    return jsonify({'batch': batch})
+
+
+@app.route('/api/batches/<batch_id>', methods=['GET'])
+@api_login_required
+def get_batch_import(batch_id):
+    manager = get_batch_import_manager()
+    if manager is None:
+        return jsonify({'error': 'Batch importer is not initialized'}), 503
+    user_id, is_admin = _scope()
+    batch = manager.get_batch(batch_id, user_id=user_id, is_admin=is_admin)
+    if not batch:
+        return jsonify({'error': 'Batch not found'}), 404
+    return jsonify({'batch': batch})
+
+
+@app.route('/api/batches/<batch_id>/action', methods=['POST'])
+@api_login_required
+def batch_import_action(batch_id):
+    manager = get_batch_import_manager()
+    if manager is None:
+        return jsonify({'error': 'Batch importer is not initialized'}), 503
+    data = request.get_json(silent=True) or {}
+    action = (data.get('action') or '').strip().lower()
+    user_id, is_admin = _scope()
+    if action == 'start':
+        ok = manager.start_batch(batch_id, user_id=user_id, is_admin=is_admin)
+    elif action == 'pause':
+        ok = manager.pause_batch(batch_id, user_id=user_id, is_admin=is_admin)
+    elif action == 'resume':
+        ok = manager.resume_batch(batch_id, user_id=user_id, is_admin=is_admin)
+    elif action == 'cancel':
+        ok = manager.cancel_batch(batch_id, user_id=user_id, is_admin=is_admin)
+    else:
+        return jsonify({'error': 'Unknown action'}), 400
+
+    if not ok:
+        return jsonify({'error': 'Batch action not permitted or no state change'}), 409
+    batch = manager.get_batch(batch_id, user_id=user_id, is_admin=is_admin)
+    return jsonify({'status': 'ok', 'batch': batch})
+
+
+@app.route('/api/batches/<batch_id>/download/<kind>', methods=['GET'])
+@api_login_required
+def download_batch_file(batch_id, kind):
+    manager = get_batch_import_manager()
+    if manager is None:
+        return jsonify({'error': 'Batch importer is not initialized'}), 503
+    user_id, is_admin = _scope()
+    batch = manager.get_batch(batch_id, user_id=user_id, is_admin=is_admin)
+    if not batch:
+        return jsonify({'error': 'Batch not found'}), 404
+    try:
+        body, filename = manager.download_text(batch_id, kind)
+    except KeyError:
+        return jsonify({'error': 'Unknown download type'}), 404
+    response = make_response(body)
+    response.headers['Content-Type'] = 'text/plain; charset=utf-8'
+    response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
 
 
 @app.route('/api/jobs/retry', methods=['POST'])
@@ -1501,6 +1633,7 @@ def handle_cancel_upload(data):
 # Register pipeline handler and restore queued jobs from DB
 job_manager.set_process_func(process_video_job)
 job_manager.set_resume_func(resume_upload_job)
+init_batch_import_manager()
 
 
 def _reemit_parked_previews() -> None:

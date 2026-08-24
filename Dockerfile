@@ -30,11 +30,13 @@ EXPOSE 5006
 # verifies yt-dlp + the configured LLM. Marks the container unhealthy when the
 # top outage classes (model drift / yt-dlp drift) are present.
 HEALTHCHECK --interval=5m --timeout=20s --start-period=40s --retries=3 \
-    CMD curl -fsS http://localhost:5006/api/health || exit 1
+    CMD sh -c 'curl -fsS "http://localhost:${PORT:-5006}/health" || exit 1'
 
 # Default environment variables
 ENV FLASK_DEBUG=false
+ENV HOST=0.0.0.0
+ENV PORT=5006
 ENV PYTHONPATH=/app
 
 # Upgrade yt-dlp (with curl-cffi for Instagram impersonation) on startup
-CMD ["sh", "-c", "pip install --upgrade \"yt-dlp[curl-cffi]\" && python ui/app.py"]
+CMD ["sh", "-c", "pip install --upgrade \"yt-dlp[curl-cffi]\" && exec python ui/app.py"]

@@ -32,6 +32,7 @@ Pick-a-Recipe is a Python application that:
 - 🖼️ Dish image extraction with manual selection option
 - 🌐 Web UI with real-time progress updates
 - 🔐 User authentication and settings management
+- 📦 Batch Import page with persistent TXT uploads and resume support
 - 🐳 Docker support for easy deployment
 - 📱 **PWA Support** - Install as app on mobile, share URLs directly from Android/iOS
 
@@ -161,6 +162,15 @@ All configuration is managed through the web UI settings page (`/settings`). On 
 6. If "Confirm Before Upload" is enabled, review and optionally edit the recipe
 7. The recipe is automatically uploaded to your configured recipe manager
 
+### Batch Import
+
+1. Open **Batch Import** from the sidebar.
+2. Upload a TXT file with one TikTok URL per line.
+3. Empty lines are ignored, URLs are normalized, and duplicates are removed.
+4. Already successful URLs are skipped and never re-imported.
+5. Use Start, Pause, Resume, and Cancel from the page.
+6. Download `successful.txt`, `failed.txt`, and `batch.log` when needed.
+
 ### PWA / Mobile App (Share Links Directly)
 
 Pick-a-Recipe supports PWA (Progressive Web App) installation, allowing you to share video links directly from your phone:
@@ -227,6 +237,30 @@ pick-a-recipe/
 ```
 
 ## Docker Deployment
+
+### Railway Deployment
+
+Pick-a-Recipe runs cleanly on Railway as a single Docker-based web service.
+
+1. Create a Railway project and connect your GitHub fork.
+2. Use the repository `Dockerfile` as the build target.
+3. Add a Railway volume and mount it at `/app/data`.
+4. Set these environment variables:
+   - `HOST=0.0.0.0`
+   - `PORT` is provided by Railway automatically
+   - `DATA_DIR=/app/data`
+   - `FLASK_SECRET_KEY` to a long random value
+   - `AUTHENTIK_CLIENT_ID`
+   - `AUTHENTIK_CLIENT_SECRET`
+   - `AUTHENTIK_ISSUER_URL`
+5. Configure OpenAI or Gemini, plus the Tandoor host and API key, from the web UI after first login.
+6. Verify the deployment at `/health`.
+
+Operational notes:
+
+- The Flask app binds to the Railway `PORT` environment variable.
+- All persistent runtime state lives under `DATA_DIR` or `/app/data`.
+- The Batch Import page stores uploaded TXT files, logs, and generated download files in the persistent data directory.
 
 ### Docker Hub Image
 

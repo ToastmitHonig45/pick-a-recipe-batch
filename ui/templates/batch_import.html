@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block title %}Batch Import - Pick-a-Recipe{% endblock %}
+
+{% block content %}
+<div class="main-container batch-page">
+    <div class="header">
+        <h1><i class="fas fa-file-arrow-up"></i> Batch Import</h1>
+        <p>Upload a TXT file with TikTok URLs. The importer runs sequentially, persists progress, and survives restarts.</p>
+    </div>
+
+    <div class="batch-grid">
+        <section class="batch-panel">
+            <h2>Upload TXT</h2>
+            <form id="batch-upload-form" class="batch-upload-form">
+                <label class="file-dropzone" for="batch-file">
+                    <input id="batch-file" name="file" type="file" accept=".txt,text/plain" required>
+                    <div class="dropzone-copy">
+                        <i class="fas fa-file-lines"></i>
+                        <strong>Select a TXT file</strong>
+                        <span>One TikTok URL per line. Empty lines and duplicates are ignored.</span>
+                    </div>
+                </label>
+                <div class="batch-upload-actions">
+                    <button type="submit" class="btn btn-primary" id="batch-upload-btn">
+                        <i class="fas fa-play"></i>
+                        Start Batch
+                    </button>
+                    <button type="button" class="btn btn-secondary" id="batch-refresh-btn">
+                        <i class="fas fa-rotate"></i>
+                        Refresh
+                    </button>
+                </div>
+                <p class="input-hint">
+                    The importer pauses 5 seconds between URLs, retries temporary network errors up to 3 times, and skips private or deleted videos.
+                </p>
+            </form>
+        </section>
+
+        <section class="batch-panel batch-summary-panel">
+            <h2>Current Batch</h2>
+            <div id="batch-empty-state" class="batch-empty-state">
+                <i class="fas fa-inbox"></i>
+                <p>No batch is active right now.</p>
+            </div>
+            <div id="batch-shell" style="display:none;">
+                <div class="batch-metrics">
+                    <div class="metric-card">
+                        <span>Total</span>
+                        <strong id="batch-total">0</strong>
+                    </div>
+                    <div class="metric-card">
+                        <span>Pending</span>
+                        <strong id="batch-pending">0</strong>
+                    </div>
+                    <div class="metric-card">
+                        <span>Successful</span>
+                        <strong id="batch-success">0</strong>
+                    </div>
+                    <div class="metric-card">
+                        <span>Failed</span>
+                        <strong id="batch-failed">0</strong>
+                    </div>
+                </div>
+
+                <div class="progress-bar-container batch-progress">
+                    <div class="progress-bar" id="batch-progress-bar" style="width:0%"></div>
+                    <span class="progress-text" id="batch-progress-text">0%</span>
+                </div>
+
+                <div class="batch-controls">
+                    <button type="button" class="btn btn-primary btn-sm" id="batch-start-btn">
+                        <i class="fas fa-play"></i> Start
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="batch-pause-btn">
+                        <i class="fas fa-pause"></i> Pause
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="batch-resume-btn">
+                        <i class="fas fa-forward"></i> Resume
+                    </button>
+                    <button type="button" class="btn btn-danger btn-sm" id="batch-cancel-btn">
+                        <i class="fas fa-ban"></i> Cancel
+                    </button>
+                </div>
+
+                <div class="batch-downloads">
+                    <a id="download-successful" class="btn btn-secondary btn-sm" href="#" target="_blank" rel="noopener">
+                        <i class="fas fa-file-arrow-down"></i> successful.txt
+                    </a>
+                    <a id="download-failed" class="btn btn-secondary btn-sm" href="#" target="_blank" rel="noopener">
+                        <i class="fas fa-file-arrow-down"></i> failed.txt
+                    </a>
+                    <a id="download-log" class="btn btn-secondary btn-sm" href="#" target="_blank" rel="noopener">
+                        <i class="fas fa-file-arrow-down"></i> batch.log
+                    </a>
+                </div>
+
+                <div class="batch-status-line">
+                    <span id="batch-status-pill" class="status-pill mono">pending</span>
+                    <span id="batch-status-message">Waiting for input</span>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <section class="batch-panel batch-items-panel">
+        <div class="panel-header">
+            <h2>Items</h2>
+            <p class="input-hint">Successful URLs are stored permanently and are never re-imported again.</p>
+        </div>
+        <div id="batch-items" class="batch-items"></div>
+    </section>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    window.BATCH_CONFIG = {
+        activeBatch: {{ batch | tojson }},
+    };
+</script>
+<script src="{{ url_for('static', filename='js/batch-import.js') }}?v={{ static_version }}"></script>
+{% endblock %}

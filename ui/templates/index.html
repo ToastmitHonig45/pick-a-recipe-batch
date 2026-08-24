@@ -21,14 +21,12 @@
             </button>
         </div>
         <p class="input-hint">Jobs queue automatically — up to {{ max_concurrent }} process in parallel</p>
-        <details class="batch-input-section" style="margin-top: 1rem;">
-            <summary style="cursor: pointer; color: var(--text-muted, #888);">Batch import (multiple URLs)</summary>
-            <textarea id="batch-urls" class="url-input" rows="4" style="width:100%; margin-top:0.5rem;"
-                      placeholder="One URL per line..."></textarea>
-            <button id="batch-process-btn" class="btn btn-secondary" style="margin-top: 0.5rem;">
-                <i class="fas fa-layer-group"></i> Queue All
-            </button>
-        </details>
+        <div style="margin-top: 1rem;">
+            <a href="{{ url_for('batch_import_page') }}" class="btn btn-secondary">
+                <i class="fas fa-file-arrow-up"></i>
+                Open Batch Import
+            </a>
+        </div>
     </div>
     
     <!-- Active Jobs Section -->

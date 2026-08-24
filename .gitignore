@@ -159,6 +159,7 @@ tmp/
 
 # Pick-a-Recipe database
 pick-a-recipe.db
+data/
 
 # Portainer local secrets
 portainer/stack.env.local
