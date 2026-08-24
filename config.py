@@ -79,12 +79,12 @@ DEFAULT_CONFIG = {
     "openai_model": "gpt-5-mini-2025-08-07",
     "gemini_api_key": "",
     "gemini_model": "gemini-3.5-flash",
-    "recipe_lang": "hebrew",
+    "recipe_lang": "German",
     "mealie_api_key": "",
     "mealie_host": "",
     "tandoor_api_key": "",
     "tandoor_host": "",
-    "target_language": "he",
+    "target_language": "de",
     "mealie_enabled": "false",
     "tandoor_enabled": "true",
     "whisper_model": "small",
@@ -223,7 +223,10 @@ class Config:
 
     @property
     def RECIPE_LANG(self) -> str:
-        return self._get('recipe_lang', DEFAULT_CONFIG['recipe_lang'])
+        return os.environ.get(
+            'RECIPE_LANG',
+            self._get('recipe_lang', DEFAULT_CONFIG['recipe_lang']),
+        )
 
     @property
     def MEALIE_API_KEY(self) -> str:
@@ -243,7 +246,10 @@ class Config:
 
     @property
     def TARGET_LANGUAGE(self) -> str:
-        return self._get('target_language', DEFAULT_CONFIG['target_language'])
+        return os.environ.get(
+            'TARGET_LANGUAGE',
+            self._get('target_language', DEFAULT_CONFIG['target_language']),
+        )
 
     @property
     def MEALIE_ENABLED(self) -> bool:
