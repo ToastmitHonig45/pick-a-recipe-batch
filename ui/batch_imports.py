@@ -1033,6 +1033,21 @@ class BatchImportManager:
         _ensure_schema()
         with get_db() as conn:
             cursor = conn.cursor()
+            # One release could download a video successfully but fail before
+            # transcription because the per-video cache directory had not
+            # been created. Requeue only that exact infrastructure failure;
+            # genuine private/deleted/bad videos must remain failed.
+            cursor.execute(
+                '''
+                    UPDATE batch_import_items
+                    SET status = 'pending', attempts = 0, error_message = NULL,
+                        finished_at = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE status = 'failed'
+                      AND error_message LIKE '%No such file or directory:%'
+                      AND error_message LIKE '%/transcription_%.txt%'
+                '''
+            )
+            repaired_items = cursor.rowcount
             cursor.execute(
                 '''
                     UPDATE batch_import_items
@@ -1044,15 +1059,32 @@ class BatchImportManager:
             cursor.execute(
                 '''
                     UPDATE batch_imports
+                    SET status = 'running', completed_at = NULL,
+                        error_message = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE id IN (
+                        SELECT DISTINCT batch_id FROM batch_import_items
+                        WHERE status = 'pending'
+                    )
+                      AND status = 'completed'
+                '''
+            )
+            cursor.execute(
+                '''
+                    UPDATE batch_imports
                     SET status = 'running', updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'running'
                 '''
             )
             restored_batches = cursor.rowcount
             conn.commit()
-        if restored_items or restored_batches:
-            _append_log('recovery', f'Restored {restored_items} running item(s) after restart')
-        return restored_items
+        total_restored = repaired_items + restored_items
+        if total_restored or restored_batches:
+            _append_log(
+                'recovery',
+                f'Restored {total_restored} item(s) after restart '
+                f'({repaired_items} cache-directory failure(s))',
+            )
+        return total_restored
 
     def download_text(self, batch_id: str, kind: str) -> tuple[str, str]:
         batch = self._get_batch_row(batch_id)
