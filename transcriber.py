@@ -356,16 +356,26 @@ class Transcriber:
         target_lang = lang_names.get(
             config.TARGET_LANGUAGE, config.TARGET_LANGUAGE)
 
-        return f"""Analyze this video/images and extract ALL text that appears on screen.
-This includes:
-- Recipe titles and names
-- Ingredient lists with quantities
-- Cooking instructions or steps
-- Captions or subtitles
-- Any overlay text, annotations, or labels
-- Timer displays or temperatures
+        return f"""Analyze the ENTIRE cooking video multimodally and produce exhaustive
+recipe evidence for a second model that will build the final recipe. Use all of:
+- what is visibly shown in every part of the video
+- spoken narration and relevant sounds
+- captions, subtitles, ingredient overlays and other on-screen text
 
-Return ONLY the extracted text, organized logically.
-If text appears multiple times, include it once.
-Format ingredient lists clearly with quantities and measurements.
-Output the text in {target_lang} language. If the original text is in a different language, translate it to {target_lang}."""
+Report, in chronological order:
+1. The dish or recipe name.
+2. EVERY ingredient that is named, written, or clearly visible being used.
+3. Exact quantities and units only when stated, written, measured, or safely
+   countable from the video. If an ingredient is clear but its quantity is not,
+   include the ingredient and explicitly write \"quantity not shown\".
+4. EVERY preparation and cooking action shown or described, including order,
+   cookware, heat level, temperature, duration, texture and doneness cues.
+5. Garnishes, sauces, seasonings, oil/butter, and small additions that are easy
+   to miss.
+
+Do not merely transcribe overlay text. Visually identify obvious foods and
+actions even when they have no label. Do not invent an ingredient that is not
+supported by the video, and never invent an exact quantity.
+
+Return a detailed, logically organized observation report in {target_lang}.
+Translate content from other languages into {target_lang}."""
