@@ -220,6 +220,10 @@ General rules:
   do not reduce the recipe to only explicitly measured ingredients.
 - If an ingredient is clearly used but its amount is unknown, include it with
   empty quantity and unit fields instead of omitting it.
+- Before responding, internally audit the complete evidence against the draft:
+  every ingredient used in any instruction must appear in recipeIngredients,
+  and every supported preparation/cooking action must appear chronologically.
+  Correct omissions and contradictions before emitting the JSON.
 - Keep instructions chronological; one step per HowToStep.
 - Only output the JSON object (no explanations).
 - ALL TEXT MUST BE IN {target_lang}.
