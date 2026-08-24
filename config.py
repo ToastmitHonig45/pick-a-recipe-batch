@@ -78,7 +78,7 @@ DEFAULT_CONFIG = {
     "openai_api_key": "",
     "openai_model": "gpt-5-mini-2025-08-07",
     "gemini_api_key": "",
-    "gemini_model": "gemini-2.5-flash",
+    "gemini_model": "gemini-3.5-flash",
     "recipe_lang": "hebrew",
     "mealie_api_key": "",
     "mealie_host": "",
@@ -216,7 +216,10 @@ class Config:
 
     @property
     def GEMINI_MODEL(self) -> str:
-        return self._get('gemini_model', DEFAULT_CONFIG['gemini_model'])
+        return os.environ.get(
+            'GEMINI_MODEL',
+            self._get('gemini_model', DEFAULT_CONFIG['gemini_model']),
+        )
 
     @property
     def RECIPE_LANG(self) -> str:
