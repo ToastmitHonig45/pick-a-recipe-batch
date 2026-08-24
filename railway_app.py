@@ -71,4 +71,4 @@ flask_app.view_functions["login"] = railway_login
 
 
 if __name__ == "__main__":
-    original.socketio.run(flask_app, host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "5006")), debug=False)
+    original.socketio.run(flask_app, host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "5006")), debug=False, allow_unsafe_werkzeug=True)
