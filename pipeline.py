@@ -106,6 +106,7 @@ def run_extraction_pipeline(
             return PipelineResult(error="Failed to download video")
 
         dish_dir = os.path.join(work_dir, vid_id)
+        os.makedirs(dish_dir, exist_ok=True)
         reporter.update("download", "Video downloaded successfully", 30)
 
         if reporter.is_cancelled():
