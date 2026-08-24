@@ -252,7 +252,13 @@ class Config:
 
     @property
     def WHISPER_MODEL(self) -> str:
-        return self._get('whisper_model', DEFAULT_CONFIG['whisper_model'])
+        # Cloud deployments can override a heavier persisted UI selection.
+        # This prevents low-memory workers from being killed while loading
+        # Whisper, while preserving the normal web setting everywhere else.
+        return os.environ.get(
+            'WHISPER_MODEL',
+            self._get('whisper_model', DEFAULT_CONFIG['whisper_model']),
+        )
 
     @property
     def CONFIRM_BEFORE_UPLOAD(self) -> bool:
