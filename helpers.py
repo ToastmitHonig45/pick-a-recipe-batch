@@ -214,6 +214,12 @@ Ingredients:
   - Merge true duplicates (identical food+quantity+unit+notes).
 
 General rules:
+- Treat the supplied transcript as combined evidence from narration, on-screen
+  text, and visual analysis of the complete video.
+- Include every ingredient and chronological action supported by that evidence;
+  do not reduce the recipe to only explicitly measured ingredients.
+- If an ingredient is clearly used but its amount is unknown, include it with
+  empty quantity and unit fields instead of omitting it.
 - Keep instructions chronological; one step per HowToStep.
 - Only output the JSON object (no explanations).
 - ALL TEXT MUST BE IN {target_lang}.
