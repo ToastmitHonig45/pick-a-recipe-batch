@@ -1043,15 +1043,20 @@ class BatchImportManager:
                     SET status = 'pending', attempts = 0, error_message = NULL,
                         finished_at = NULL, updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'failed'
-                      AND error_message LIKE '%No such file or directory:%'
-                      AND error_message LIKE '%/transcription_%.txt%'
+                      AND (
+                        (error_message LIKE '%No such file or directory:%'
+                         AND error_message LIKE '%/transcription_%.txt%')
+                        OR error_message = 'Failed after 3 attempts'
+                      )
                 '''
             )
             repaired_items = cursor.rowcount
             cursor.execute(
                 '''
                     UPDATE batch_import_items
-                    SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+                    SET status = 'pending', attempts = 0,
+                        error_message = NULL, finished_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'running'
                 '''
             )
