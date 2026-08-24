@@ -22,7 +22,7 @@ logger = setup_logger(__name__)
 # Per-provider fallback chains, most-preferred first.
 FALLBACK_MODELS = {
     "openai": ["gpt-5-mini-2025-08-07", "gpt-4o-mini", "gpt-4o"],
-    "gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
+    "gemini": ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
 }
 
 _MODEL_GONE_MARKERS = (
