@@ -523,12 +523,12 @@ def settings():
         config['openai_model'] = request.form.get('openai_model', '')
         config['gemini_api_key'] = request.form.get('gemini_api_key', '')
         config['gemini_model'] = request.form.get('gemini_model', '')
-        config['recipe_lang'] = request.form.get('recipe_lang', 'hebrew')
+        config['recipe_lang'] = request.form.get('recipe_lang', 'German')
         config['mealie_api_key'] = request.form.get('mealie_api_key', '')
         config['mealie_host'] = request.form.get('mealie_host', '')
         config['tandoor_api_key'] = request.form.get('tandoor_api_key', '')
         config['tandoor_host'] = request.form.get('tandoor_host', '')
-        config['target_language'] = request.form.get('target_language', 'he')
+        config['target_language'] = request.form.get('target_language', 'de')
         config['tandoor_enabled'] = 'true' if request.form.get('tandoor_enabled') else 'false'
         config['mealie_enabled'] = 'true' if request.form.get('mealie_enabled') else 'false'
         config['whisper_model'] = request.form.get('whisper_model', 'small')
